@@ -1,26 +1,47 @@
-- name: Install deps
-  run: |
-    python -m pip install --upgrade pip
-    pip install -r flipmilhas-scraper/requirements.txt
+name: scrape-flipmilhas
 
-- name: Run scraper (1 ciclo headless)
-  run: |
-    python flipmilhas-scraper/flipmilhas_scraper_gha.py --headless --once
+on:
+  schedule:
+    - cron: "*/30 * * * *"   # a cada 30 min (UTC)
+  workflow_dispatch:          # botão "Run workflow"
 
-- name: Upload artifact (planilha)
-  if: always()
-  uses: actions/upload-artifact@v4
-  with:
-    name: FLIPMILHAS-planilha
-    path: output/FLIPMILHAS.xlsx
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
-- name: Commit cópia com timestamp
-  run: |
-    mkdir -p data
-    ts=$(date +'%Y%m%d_%H%M%S')
-    cp output/FLIPMILHAS.xlsx "data/FLIPMILHAS_${ts}.xlsx"
-    git config user.name "github-actions[bot]"
-    git config user.email "github-actions[bot]@users.noreply.github.com"
-    git add data/*.xlsx
-    git commit -m "Atualiza FLIPMILHAS.xlsx (${ts}) [skip ci]" || echo "Sem mudanças"
-    git push
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r flipmilhas-scraper/requirements.txt
+
+      - name: Run scraper (salva na RAIZ/output)
+        run: |
+          python flipmilhas-scraper/flipmilhas_scraper_gha.py --headless --once
+          ls -lah output || true
+
+      - name: Upload artifact (planilha)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: FLIPMILHAS-planilha
+          path: output/FLIPMILHAS.xlsx
+
+      - name: Commit cópia com timestamp em data/
+        run: |
+          mkdir -p data
+          ts=$(date +'%Y%m%d_%H%M%S')
+          cp output/FLIPMILHAS.xlsx "data/FLIPMILHAS_${ts}.xlsx"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/*.xlsx
+          git commit -m "Atualiza FLIPMILHAS.xlsx (${ts}) [skip ci]" || echo "Sem mudanças"
+          git push
