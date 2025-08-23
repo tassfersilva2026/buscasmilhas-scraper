@@ -2,8 +2,8 @@ name: scrape-flipmilhas
 
 on:
   schedule:
-    - cron: "*/30 * * * *"   # a cada 30 min (UTC)
-  workflow_dispatch:          # botão "Run workflow"
+    - cron: "*/30 * * * *"   # a cada 30 min (UTC). 07:00 BRT = 0 10 * * *
+  workflow_dispatch:
 
 jobs:
   run:
@@ -18,14 +18,14 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install deps
+      - name: Install deps (na RAIZ)
         run: |
           python -m pip install --upgrade pip
-          pip install -r flipmilhas-scraper/requirements.txt
+          pip install -r requirements.txt
 
-      - name: Run scraper (salva na RAIZ/output)
+      - name: Run scraper (gera output/FLIPMILHAS.xlsx na RAIZ)
         run: |
-          python flipmilhas-scraper/flipmilhas_scraper_gha.py --headless --once
+          python flipmilhas_scraper_gha.py --headless --once
           ls -lah output || true
 
       - name: Upload artifact (planilha)
