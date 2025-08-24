@@ -25,20 +25,11 @@ jobs:
         with:
           python-version: "3.12"
 
-      # 1) Chrome
-      - uses: browser-actions/setup-chrome@v1
+      # Chrome + Chromedriver compatível (num passo só)
+      - uses: browser-actions/setup-chrome@v2
         id: chrome
-
-      # 2) Chromedriver que casa com o Chrome acima
-      - uses: browser-actions/setup-chromedriver@v1
-        id: chromedriver
         with:
-          chrome-version: ${{ steps.chrome.outputs.chrome-version }}
-
-      # 3) Remove o chromedriver velho (139) do PATH pra não conflitar
-      - name: Remove stock chromedriver from PATH
-        run: |
-          sudo rm -f /usr/bin/chromedriver || true
+          install-chromedriver: true   # instala o driver casado com o Chrome
 
       - name: Install deps
         run: |
@@ -46,17 +37,17 @@ jobs:
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           python -m pip install "selenium>=4.24.0" "openpyxl>=3.1.2"
 
-      - name: Sanity check
+      - name: Sanity check (ver versões)
         run: |
-          which google-chrome || true
-          echo "Chrome:  ${{ steps.chrome.outputs.chrome-version }}"
-          echo "Driver:  ${{ steps.chromedriver.outputs.chromedriver-version }}"
-          ls -l "${{ steps.chromedriver.outputs.chromedriver-path }}"
+          echo "Chrome:       ${{ steps.chrome.outputs.chrome-version }}"
+          echo "Chromedriver: ${{ steps.chrome.outputs.chromedriver-version }}"
+          ${{ steps.chrome.outputs.chrome-path }} --version
+          ${{ steps.chrome.outputs.chromedriver-path }} --version
 
-      - name: Run scraper (gera output/FLIPMILHAS.xlsx na raiz)
+      - name: Run scraper (gera output/FLIPMILHAS.xlsx)
         env:
           CHROME_PATH: ${{ steps.chrome.outputs.chrome-path }}
-          CHROMEDRIVER_PATH: ${{ steps.chromedriver.outputs.chromedriver-path }}
+          CHROMEDRIVER_PATH: ${{ steps.chrome.outputs.chromedriver-path }}
         run: |
           python flipmilhas_scraper_gha.py --headless --once
 
