@@ -1,8 +1,6 @@
 from __future__ import annotations
 from pathlib import Path
-from io import BytesIO
 from typing import List, Optional
-import os
 import re
 import numpy as np
 import pandas as pd
@@ -12,25 +10,27 @@ import altair as alt
 # ==========================
 # Configuração base do app
 # ==========================
-st.set_page_config(page_title="Painel de Concorrência — data/", layout="wide")
+st.set_page_config(page_title="Painel de Concorrência — Flip/Capo/Max/123", layout="wide")
 
-# Tema simples (tons de cinza + amarelo)
-AMARELO = "#F2C94C"  # amarelo
+# Tema: tons de cinza + amarelo
+AMARELO = "#F2C94C"
 CINZA_TXT = "#333333"
-CINZA_BG = "#F5F5F5"
+CINZA_BG  = "#F7F7F7"
 
 st.markdown(
     f"""
     <style>
       .block-container {{ padding-top: 0.8rem; }}
       h1, h2, h3, h4, h5, h6 {{ color: {CINZA_TXT}; }}
-      [data-testid="stMetricDelta"] {{ color: {CINZA_TXT} !important; }}
-      .kpi .stMetric {{ background:{CINZA_BG}; border-radius:1rem; padding:0.8rem; }}
-      .viewbox {{ border:1px solid #e5e5e5; border-radius:1rem; padding:1rem; margin-bottom:1rem; }}
+      .kpi .stMetric {{ background:{CINZA_BG}; border-radius:12px; padding:10px; }}
+      .viewbox {{ border:1px solid #eee; border-radius:12px; padding:12px; margin-bottom:14px; }}
     </style>
     """,
     unsafe_allow_html=True,
 )
+
+# Título discreto, sem emojis
+st.markdown("<h4>Painel de Concorrência — Flip/Capo/Max/123</h4>", unsafe_allow_html=True)
 
 # ==========================
 # Localização da pasta data/
@@ -38,7 +38,7 @@ st.markdown(
 
 def find_data_dir(start: Path) -> str:
     cur: Optional[Path] = start
-    for _ in range(8):  # sobe alguns níveis até achar data/
+    for _ in range(8):
         data_here = cur / "data"
         if data_here.exists() and data_here.is_dir():
             return data_here.as_posix()
@@ -50,7 +50,7 @@ def find_data_dir(start: Path) -> str:
 DATA_DIR_DEFAULT = find_data_dir(Path(__file__).resolve())
 
 # ==========================
-# Funções utilitárias
+# Funções utilitárias de leitura
 # ==========================
 
 @st.cache_data(show_spinner=False)
@@ -59,10 +59,10 @@ def _list_files(data_dir: str, patterns: List[str] | None = None) -> List[Path]:
     if not p.exists():
         return []
     pats = patterns or ["*.xlsx", "*.xls", "*.csv", "*.parquet"]
-    files: List[Path] = []
+    out: List[Path] = []
     for pat in pats:
-        files.extend(sorted(p.glob(pat)))
-    return files
+        out.extend(sorted(p.glob(pat)))
+    return out
 
 
 def _to_float_series(s: pd.Series) -> pd.Series:
@@ -133,7 +133,7 @@ def _read_one(path: str, mtime: float) -> pd.DataFrame:
         if c not in df.columns:
             df[c] = np.nan
 
-    # Tipos numéricos
+    # Números
     for c in ["TARIFA", "TX DE EMBARQUE", "TOTAL"]:
         df[c] = _to_float_series(df[c])
 
@@ -196,42 +196,43 @@ def fmt_moeda(v) -> str:
         return "-"
 
 # ==========================
-# Carregamento de dados
+# Abas (no topo) — conteúdo vem depois
 # ==========================
 
-st.title("📊 Painel de Concorrência — Flip/Capo/Max/123")
-st.caption("Sem menu lateral. Filtros horizontais aplicados a todas as abas.")
+abas = st.tabs(["FLIPMILHAS", "CAPO VIAGENS", "MAXMILHAS", "123MILHAS"])
 
-with st.spinner("Lendo planilhas da pasta data/…"):
+# ==========================
+# Filtros horizontais (globais para todas as abas)
+# ==========================
+
+with st.container():
     df_all = load_all(DATA_DIR_DEFAULT)
+    if df_all.empty:
+        st.warning("Nenhum arquivo lido. Verifique a pasta `data/`.")
+        st.stop()
 
-if df_all.empty:
-    st.warning("Nenhum arquivo lido. Verifique a pasta `data/`." )
-    st.stop()
+    min_d = df_all["BUSCA_DATETIME"].dropna().min()
+    max_d = df_all["BUSCA_DATETIME"].dropna().max()
 
-# ==========================
-# Filtros (horizontais, globais)
-# ==========================
+    c1, c2, c3, c4, c5 = st.columns([1.2,1.2,1.6,3.4,1.6])
+    d_ini = c1.date_input("Data inicial", value=min_d.date() if pd.notna(min_d) else None,
+                          min_value=min_d.date() if pd.notna(min_d) else None,
+                          max_value=max_d.date() if pd.notna(max_d) else None,
+                          format="DD/MM/YYYY")
+    d_fim = c2.date_input("Data final",   value=max_d.date() if pd.notna(max_d) else None,
+                          min_value=min_d.date() if pd.notna(min_d) else None,
+                          max_value=max_d.date() if pd.notna(max_d) else None,
+                          format="DD/MM/YYYY")
 
-min_d = df_all["BUSCA_DATETIME"].dropna().min()
-max_d = df_all["BUSCA_DATETIME"].dropna().max()
+    advp_opts   = sorted([int(x) for x in df_all["ADVP"].dropna().unique()])
+    trecho_opts = sorted([str(x) for x in df_all["TRECHO"].dropna().unique() if str(x).strip()])
+    hora_opts   = sorted([int(x) for x in df_all["HORA_HH"].dropna().unique()])
 
-col1, col2, col3, col4, col5 = st.columns([1.2,1.2,1,2,1.2])
-if pd.isna(min_d) or pd.isna(max_d):
-    d_ini = d_fim = None
-else:
-    d_ini = col1.date_input("Data inicial", value=min_d.date(), min_value=min_d.date(), max_value=max_d.date(), format="DD/MM/YYYY")
-    d_fim = col2.date_input("Data final",   value=max_d.date(), min_value=min_d.date(), max_value=max_d.date(), format="DD/MM/YYYY")
+    advp_sel   = c3.multiselect("ADVP", options=advp_opts, default=[], placeholder="Todos")
+    trecho_sel = c4.multiselect("Trechos", options=trecho_opts, default=[], placeholder="Todos")
+    hora_sel   = c5.multiselect("Hora da busca", options=hora_opts, default=[], placeholder="Todas")
 
-advp_opts = sorted([int(x) for x in df_all["ADVP"].dropna().unique()])
-hora_opts = sorted([int(x) for x in df_all["HORA_HH"].dropna().unique()])
-trecho_opts = sorted([str(x) for x in df_all["TRECHO"].dropna().unique() if str(x).strip()])
-
-advp_sel  = col3.multiselect("ADVP", options=advp_opts, default=advp_opts)
-trecho_sel= col4.multiselect("Trechos", options=trecho_opts, default=trecho_opts)
-hora_sel  = col5.multiselect("Hora da busca", options=hora_opts, default=hora_opts)
-
-# Aplica filtros globais
+# Aplica filtros globais (vazio = todos)
 mask = pd.Series(True, index=df_all.index)
 if d_ini and d_fim:
     d0, d1 = pd.to_datetime(d_ini), pd.to_datetime(d_fim)
@@ -246,49 +247,53 @@ if hora_sel:
 view_all = df_all.loc[mask].copy()
 
 st.caption(
-    f"Linhas após filtros: **{len(view_all):,}** | Última atualização: **{df_all['BUSCA_DATETIME'].max():%d/%m/%Y - %H:%M:%S}**".replace(",", ".")
+    f"Linhas após filtros: **{len(view_all):,}** • Última atualização: **{df_all['BUSCA_DATETIME'].max():%d/%m/%Y - %H:%M:%S}**".replace(",", ".")
 )
 
-# ==========================
-# Funções de agregação/plots
-# ==========================
+# ======================================================
+# Helpers de gráfico (legenda horizontal + rótulos + nota)
+# ======================================================
 
-def chart_line(df: pd.DataFrame, x: str, y: str, title: str):
-    ch = (
-        alt.Chart(df)
-        .mark_line(point=True, color=AMARELO)
-        .encode(x=x, y=y, tooltip=list(df.columns))
-        .properties(height=280, title=title)
-    )
+def _apply_hlegend(color_enc):
+    return color_enc.legend(orient="top", direction="horizontal")
+
+
+def chart_line(df: pd.DataFrame, x: str, y: str, title: str, note: str, fmt: str = ",.0f"):
+    base = alt.Chart(df).encode(x=x, y=y)
+    line = base.mark_line(color=AMARELO)
+    pts  = base.mark_point(color=AMARELO)
+    txt  = base.mark_text(dy=-8, color="#666", size=10).encode(text=alt.Text(y, format=fmt))
+    ch   = (line + pts + txt).properties(title=title, height=300)
     st.altair_chart(ch, use_container_width=True)
+    st.caption(note)
 
 
-def chart_bar(df: pd.DataFrame, x: str, y: str, title: str):
-    ch = (
-        alt.Chart(df)
-        .mark_bar(color=AMARELO)
-        .encode(x=x, y=y, tooltip=list(df.columns))
-        .properties(height=320, title=title)
-    )
+def chart_bar(df: pd.DataFrame, x: str, y: str, title: str, note: str, fmt: str = ",.0f"):
+    base = alt.Chart(df).encode(x=x, y=y)
+    bar  = base.mark_bar(color=AMARELO)
+    txt  = base.mark_text(dy=-6, color="#666", size=10).encode(text=alt.Text(y, format=fmt))
+    ch   = (bar + txt).properties(title=title, height=320)
     st.altair_chart(ch, use_container_width=True)
+    st.caption(note)
 
 
-def chart_heatmap(df: pd.DataFrame, x: str, y: str, z: str, title: str):
+def chart_heatmap(df: pd.DataFrame, x: str, y: str, z: str, title: str, note: str):
     ch = (
         alt.Chart(df)
         .mark_rect()
         .encode(
             x=x,
             y=y,
-            color=alt.Color(z, scale=alt.Scale(range=["#EEEEEE", AMARELO])),
+            color=alt.Color(z, scale=alt.Scale(range=["#EEEEEE", AMARELO])).legend(orient="top", direction="horizontal"),
             tooltip=list(df.columns),
         )
         .properties(height=320, title=title)
     )
     st.altair_chart(ch, use_container_width=True)
+    st.caption(note)
 
 
-def chart_box(df: pd.DataFrame, x: str, y: str, title: str):
+def chart_box(df: pd.DataFrame, x: str, y: str, title: str, note: str):
     ch = (
         alt.Chart(df)
         .mark_boxplot(color=AMARELO)
@@ -296,20 +301,14 @@ def chart_box(df: pd.DataFrame, x: str, y: str, title: str):
         .properties(height=320, title=title)
     )
     st.altair_chart(ch, use_container_width=True)
-
+    st.caption(note)
 
 # ==========================
-# Abas
+# ABA 1 — FLIPMILHAS (10 visões)
 # ==========================
-
-abas = st.tabs(["FLIPMILHAS", "CAPO VIAGENS", "MAXMILHAS", "123MILHAS"])
-
-# --------------------------
-# ABA: FLIPMILHAS (10 visões)
-# --------------------------
 with abas[0]:
     df = view_all[view_all["EMPRESA"] == "FLIPMILHAS"].copy()
-    st.header("FLIPMILHAS")
+    st.subheader("FLIPMILHAS")
     if df.empty:
         st.info("Sem dados para os filtros atuais.")
     else:
@@ -326,18 +325,22 @@ with abas[0]:
               .groupby("DIA", as_index=False)["TOTAL"].median()
               .rename(columns={"TOTAL":"TOTAL_MED"})
         )
-        chart_line(daily, "DIA:T", "TOTAL_MED:Q", "Evolução diária do preço mediano (TOTAL)")
+        chart_line(daily, "DIA:T", "TOTAL_MED:Q", "Evolução diária do preço mediano (TOTAL)",
+                   "Série temporal da mediana diária do valor TOTAL.", fmt=", .0f")
 
         # 2) Mediana por ADVP
         by_advp = df.groupby("ADVP", as_index=False)["TOTAL"].median().rename(columns={"TOTAL":"TOTAL_MED"})
-        chart_bar(by_advp, "ADVP:O", "TOTAL_MED:Q", "Preço mediano por ADVP")
+        chart_bar(by_advp, "ADVP:O", "TOTAL_MED:Q", "Preço mediano por ADVP",
+                  "Barra com a mediana de TOTAL para cada janela ADVP (dias).", fmt=", .0f")
 
         # 3) Heatmap ADVP x Hora (mediana TOTAL)
         heat = (
             df.groupby(["ADVP","HORA_HH"], as_index=False)["TOTAL"].median()
               .rename(columns={"TOTAL":"TOTAL_MED"})
         )
-        chart_heatmap(heat, "HORA_HH:O", "ADVP:O", "TOTAL_MED:Q", "Mapa de calor: Hora x ADVP (mediana TOTAL)")
+        chart_heatmap(heat, "HORA_HH:O", "ADVP:O", "TOTAL_MED:Q",
+                      "Mapa de calor: Hora x ADVP (mediana TOTAL)",
+                      "Intensidade representa a mediana de TOTAL por hora da busca e ADVP.")
 
         # 4) Top 15 trechos pelo preço mediano
         by_trecho = (
@@ -346,39 +349,41 @@ with abas[0]:
               .sort_values("TOTAL_MED", ascending=False)
               .head(15)
         )
-        chart_bar(by_trecho, "TRECHO:N", "TOTAL_MED:Q", "Top 15 trechos por preço mediano (TOTAL)")
+        chart_bar(by_trecho, "TRECHO:N", "TOTAL_MED:Q", "Top 15 trechos por preço mediano (TOTAL)",
+                  "Trechos com maior mediana de TOTAL no período filtrado.")
 
-        # 5) Histograma de preços (TOTAL)
-        bins = pd.cut(df["TOTAL"], bins=20)
-        hist = df.groupby(bins, as_index=False)["TOTAL"].count().rename(columns={"TOTAL":"QTDE"})
-        hist["FAIXA"] = hist["TOTAL"].astype(str)
-        chart_bar(hist, "FAIXA:N", "QTDE:Q", "Distribuição de preços (TOTAL)")
+        # 5) Histograma de preços (TOTAL) — bugfix com coluna BIN
+        df = df.copy()
+        df["BIN"] = pd.cut(df["TOTAL"], bins=20)
+        hist = df.groupby("BIN", as_index=False)["TOTAL"].count().rename(columns={"TOTAL":"QTDE"})
+        hist["FAIXA"] = hist["BIN"].astype(str)
+        chart_bar(hist, "FAIXA:N", "QTDE:Q", "Distribuição de preços (TOTAL)",
+                  "Contagem de ocorrências de TOTAL por faixa de preço.")
 
         # 6) Scatter Tarifa x Taxa (amostra)
         samp = df.sample(min(5000, len(df)), random_state=42) if len(df) > 5000 else df
         ch = (
             alt.Chart(samp)
             .mark_circle(color=AMARELO, opacity=0.5)
-            .encode(x="TARIFA:Q", y="TX DE EMBARQUE:Q", tooltip=["TOTAL","TARIFA","TX DE EMBARQUE","TRECHO","ADVP","HORA_HH","BUSCA_DATETIME"])
+            .encode(x="TARIFA:Q", y="TX DE EMBARQUE:Q",
+                    tooltip=["TOTAL","TARIFA","TX DE EMBARQUE","TRECHO","ADVP","HORA_HH","BUSCA_DATETIME"])
             .properties(height=320, title="Tarifa vs Taxa de embarque (amostra)")
         )
         st.altair_chart(ch, use_container_width=True)
+        st.caption("Dispersão entre TARIFA e TX DE EMBARQUE (amostra de até 5k pontos).")
 
         # 7) Tabela: últimas 50 linhas
         st.subheader("Últimas 50 buscas")
         st.dataframe(df.sort_values("BUSCA_DATETIME", ascending=False).head(50), use_container_width=True, hide_index=True)
 
-        # 8) Tabela: menor preço por Trecho x ADVP
+        # 8) Menor preço por Trecho x ADVP
         min_tbl = (
             df.groupby(["TRECHO","ADVP"], as_index=False)
-              .agg(
-                  TOTAL_MIN=("TOTAL","min"),
-                  TARIFA_MIN=("TARIFA","min"),
-                  EXEMPLO_DATA=("BUSCA_DATETIME","max")
-              )
+              .agg(TOTAL_MIN=("TOTAL","min"), TARIFA_MIN=("TARIFA","min"), EXEMPLO_DATA=("BUSCA_DATETIME","max"))
               .sort_values(["TOTAL_MIN"], ascending=True)
         )
         st.subheader("Menor preço por Trecho x ADVP")
+        st.caption("Menor TOTAL registrado por trecho e ADVP, com data de exemplo da última observação.")
         st.dataframe(min_tbl, use_container_width=True, hide_index=True)
 
         # 9) Maiores variações d/d por Trecho (mediana TOTAL)
@@ -390,47 +395,41 @@ with abas[0]:
         dd["VAR_%"] = dd.groupby("TRECHO")["TOTAL_MED"].pct_change()*100
         var_tbl = dd.dropna(subset=["VAR_%"]).sort_values("VAR_%", ascending=False).head(20)
         st.subheader("Maiores altas d/d por trecho (mediana TOTAL)")
+        st.caption("Variação percentual diária do TOTAL mediano por trecho; top 20 maiores altas.")
         st.dataframe(var_tbl, use_container_width=True, hide_index=True)
 
         # 10) Boxplot TOTAL por Trecho (top 10 por contagem)
-        top10 = (
-            df["TRECHO"].value_counts().head(10).index.tolist()
-        )
+        top10 = df["TRECHO"].value_counts().head(10).index.tolist()
         box_df = df[df["TRECHO"].isin(top10)]
-        chart_box(box_df, "TRECHO:N", "TOTAL:Q", "Boxplot de TOTAL por Trecho (top 10)")
+        chart_box(box_df, "TRECHO:N", "TOTAL:Q", "Boxplot de TOTAL por Trecho (top 10)",
+                  "Distribuição do TOTAL por trecho com maior número de registros.")
 
-# --------------------------
-# ABA: CAPO VIAGENS (placeholder)
-# --------------------------
+# ==========================
+# Demais abas — placeholders para você plugar as visões
+# ==========================
 with abas[1]:
-    st.header("CAPO VIAGENS")
-    df = view_all[view_all["EMPRESA"] == "CAPO VIAGENS"].copy()
-    if df.empty:
+    st.subheader("CAPO VIAGENS")
+    dfx = view_all[view_all["EMPRESA"] == "CAPO VIAGENS"].copy()
+    if dfx.empty:
         st.info("Sem dados para os filtros atuais.")
     else:
-        st.write("(Reservei a estrutura; depois plugamos suas visões específicas.)")
-        st.dataframe(df.head(200), use_container_width=True, hide_index=True)
+        st.write("Estrutura reservada para visões específicas da Capo Viagens.")
+        st.dataframe(dfx.head(200), use_container_width=True, hide_index=True)
 
-# --------------------------
-# ABA: MAXMILHAS (placeholder)
-# --------------------------
 with abas[2]:
-    st.header("MAXMILHAS")
-    df = view_all[view_all["EMPRESA"] == "MAXMILHAS"].copy()
-    if df.empty:
+    st.subheader("MAXMILHAS")
+    dfx = view_all[view_all["EMPRESA"] == "MAXMILHAS"].copy()
+    if dfx.empty:
         st.info("Sem dados para os filtros atuais.")
     else:
-        st.write("(Reservei a estrutura; depois plugamos suas visões específicas.)")
-        st.dataframe(df.head(200), use_container_width=True, hide_index=True)
+        st.write("Estrutura reservada para visões específicas da MaxMilhas.")
+        st.dataframe(dfx.head(200), use_container_width=True, hide_index=True)
 
-# --------------------------
-# ABA: 123MILHAS (placeholder)
-# --------------------------
 with abas[3]:
-    st.header("123MILHAS")
-    df = view_all[view_all["EMPRESA"] == "123MILHAS"].copy()
-    if df.empty:
+    st.subheader("123MILHAS")
+    dfx = view_all[view_all["EMPRESA"] == "123MILHAS"].copy()
+    if dfx.empty:
         st.info("Sem dados para os filtros atuais.")
     else:
-        st.write("(Reservei a estrutura; depois plugamos suas visões específicas.)")
-        st.dataframe(df.head(200), use_container_width=True, hide_index=True)
+        st.write("Estrutura reservada para visões específicas da 123Milhas.")
+        st.dataframe(dfx.head(200), use_container_width=True, hide_index=True)
