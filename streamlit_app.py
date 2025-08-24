@@ -187,45 +187,42 @@ def fmt_moeda0(v) -> str:
     except Exception:
         return "-"
 
-# ==========================
-# Abas (no topo)
-# ==========================
+# ======================================================
+# >>> FILTROS NO TOPO (antes das abas) <<<
+# ======================================================
+with st.spinner("Lendo planilhas da pasta data/…"):
+    df_all = load_all(DATA_DIR_DEFAULT)
+if df_all.empty:
+    st.info("Nenhum arquivo lido. Verifique a pasta `data/`.")
+    st.stop()
 
-abas = st.tabs(["FLIPMILHAS", "CAPO VIAGENS", "MAXMILHAS", "123MILHAS"])
+min_d = df_all["BUSCA_DATETIME"].dropna().min()
+max_d = df_all["BUSCA_DATETIME"].dropna().max()
 
-# ==========================
-# Filtros (logo abaixo das abas — globais)
-# ==========================
+c1, c2, c3, c4, c5 = st.columns([1.2, 1.2, 1.6, 3.4, 1.6])
+d_ini = c1.date_input(
+    "Data inicial",
+    value=min_d.date() if pd.notna(min_d) else None,
+    min_value=min_d.date() if pd.notna(min_d) else None,
+    max_value=max_d.date() if pd.notna(max_d) else None,
+    format="DD/MM/YYYY",
+)
+d_fim = c2.date_input(
+    "Data final",
+    value=max_d.date() if pd.notna(max_d) else None,
+    min_value=min_d.date() if pd.notna(min_d) else None,
+    max_value=max_d.date() if pd.notna(max_d) else None,
+    format="DD/MM/YYYY",
+)
 
-filters_slot = st.empty()
-with filters_slot.container():
-    with st.spinner("Lendo planilhas da pasta data/…"):
-        df_all = load_all(DATA_DIR_DEFAULT)
-    if df_all.empty:
-        st.info("Nenhum arquivo lido. Verifique a pasta `data/`.")
-        st.stop()
+advp_opts   = sorted([int(x) for x in df_all["ADVP"].dropna().unique()])
+trecho_opts = sorted([str(x) for x in df_all["TRECHO"].dropna().unique() if str(x).strip()])
+hora_opts   = sorted([int(x) for x in df_all["HORA_HH"].dropna().unique()])
 
-    min_d = df_all["BUSCA_DATETIME"].dropna().min()
-    max_d = df_all["BUSCA_DATETIME"].dropna().max()
-
-    c1, c2, c3, c4, c5 = st.columns([1.2,1.2,1.6,3.4,1.6])
-    d_ini = c1.date_input("Data inicial", value=min_d.date() if pd.notna(min_d) else None,
-                          min_value=min_d.date() if pd.notna(min_d) else None,
-                          max_value=max_d.date() if pd.notna(max_d) else None,
-                          format="DD/MM/YYYY")
-    d_fim = c2.date_input("Data final",   value=max_d.date() if pd.notna(max_d) else None,
-                          min_value=min_d.date() if pd.notna(min_d) else None,
-                          max_value=max_d.date() if pd.notna(max_d) else None,
-                          format="DD/MM/YYYY")
-
-    advp_opts   = sorted([int(x) for x in df_all["ADVP"].dropna().unique()])
-    trecho_opts = sorted([str(x) for x in df_all["TRECHO"].dropna().unique() if str(x).strip()])
-    hora_opts   = sorted([int(x) for x in df_all["HORA_HH"].dropna().unique()])
-
-    # Vazio = TODOS (sem chips marcados)
-    advp_sel   = c3.multiselect("ADVP", options=advp_opts, default=[], placeholder="Todos")
-    trecho_sel = c4.multiselect("Trechos", options=trecho_opts, default=[], placeholder="Todos")
-    hora_sel   = c5.multiselect("Hora da busca", options=hora_opts, default=[], placeholder="Todas")
+# Vazio = TODOS (sem chips marcados)
+advp_sel   = c3.multiselect("ADVP", options=advp_opts, default=[], placeholder="Todos")
+trecho_sel = c4.multiselect("Trechos", options=trecho_opts, default=[], placeholder="Todos")
+hora_sel   = c5.multiselect("Hora da busca", options=hora_opts, default=[], placeholder="Todas")
 
 # Aplica filtros globais
 mask = pd.Series(True, index=df_all.index)
@@ -244,6 +241,12 @@ view_all = df_all.loc[mask].copy()
 st.caption(
     f"Linhas após filtros: **{len(view_all):,}** • Última atualização: **{df_all['BUSCA_DATETIME'].max():%d/%m/%Y - %H:%M:%S}**".replace(",", ".")
 )
+st.markdown("---")
+
+# ==========================
+# Abas (depois dos filtros)
+# ==========================
+abas = st.tabs(["FLIPMILHAS", "CAPO VIAGENS", "MAXMILHAS", "123MILHAS"])
 
 # ======================================================
 # Helpers de gráfico (eixo X horizontal + rótulos + nota)
@@ -255,7 +258,6 @@ def _x(enc: str):
 def _y(enc: str):
     return alt.Y(enc, axis=alt.Axis(format=".0f"))  # sem casas decimais
 
-
 def chart_line(df: pd.DataFrame, x: str, y: str, title: str, note: str):
     base = alt.Chart(df).encode(x=_x(x), y=_y(y))
     line = base.mark_line(color=AMARELO)
@@ -265,7 +267,6 @@ def chart_line(df: pd.DataFrame, x: str, y: str, title: str, note: str):
     st.altair_chart(ch, use_container_width=True)
     st.caption(note)
 
-
 def chart_bar(df: pd.DataFrame, x: str, y: str, title: str, note: str):
     base = alt.Chart(df).encode(x=_x(x), y=_y(y))
     bar  = base.mark_bar(color=AMARELO)
@@ -274,7 +275,6 @@ def chart_bar(df: pd.DataFrame, x: str, y: str, title: str, note: str):
     st.altair_chart(ch, use_container_width=True)
     st.caption(note)
 
-
 def chart_heatmap(df: pd.DataFrame, x: str, y: str, z: str, title: str, note: str):
     ch = (
         alt.Chart(df)
@@ -282,14 +282,17 @@ def chart_heatmap(df: pd.DataFrame, x: str, y: str, z: str, title: str, note: st
         .encode(
             x=_x(x),
             y=_y(y),
-            color=alt.Color(z, scale=alt.Scale(range=["#EEEEEE", AMARELO])).legend(orient="top", direction="horizontal"),
+            color=alt.Color(
+                z,
+                scale=alt.Scale(range=["#EEEEEE", AMARELO]),
+                legend=alt.Legend(orient="top", direction="horizontal"),
+            ),
             tooltip=list(df.columns),
         )
         .properties(height=320, title=title)
     )
     st.altair_chart(ch, use_container_width=True)
     st.caption(note)
-
 
 def chart_box(df: pd.DataFrame, x: str, y: str, title: str, note: str):
     ch = (
