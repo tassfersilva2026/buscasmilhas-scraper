@@ -12,7 +12,7 @@ import altair as alt
 # ==========================
 st.set_page_config(page_title="Painel de Concorrência — Flip/Capo/Max/123", layout="wide")
 
-# Tema: tons de cinza + amarelo
+# Tema: cinza + amarelo
 AMARELO = "#F2C94C"
 CINZA_TXT = "#333333"
 CINZA_BG  = "#F7F7F7"
@@ -20,7 +20,7 @@ CINZA_BG  = "#F7F7F7"
 st.markdown(
     f"""
     <style>
-      .block-container {{ padding-top: 0.8rem; }}
+      .block-container {{ padding-top: 0.5rem; }}
       h1, h2, h3, h4, h5, h6 {{ color: {CINZA_TXT}; }}
       .kpi .stMetric {{ background:{CINZA_BG}; border-radius:12px; padding:10px; }}
       .viewbox {{ border:1px solid #eee; border-radius:12px; padding:12px; margin-bottom:14px; }}
@@ -29,7 +29,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# Título discreto, sem emojis
+# Título discreto (sem emoji)
 st.markdown("<h4>Painel de Concorrência — Flip/Capo/Max/123</h4>", unsafe_allow_html=True)
 
 # ==========================
@@ -50,7 +50,7 @@ def find_data_dir(start: Path) -> str:
 DATA_DIR_DEFAULT = find_data_dir(Path(__file__).resolve())
 
 # ==========================
-# Funções utilitárias de leitura
+# Funções utilitárias de leitura/normalização
 # ==========================
 
 @st.cache_data(show_spinner=False)
@@ -196,19 +196,20 @@ def fmt_moeda0(v) -> str:
         return "-"
 
 # ==========================
-# Abas (no topo) — conteúdo vem depois
+# Abas (no topo)
 # ==========================
 
 abas = st.tabs(["FLIPMILHAS", "CAPO VIAGENS", "MAXMILHAS", "123MILHAS"])
 
 # ==========================
-# Filtros horizontais (globais para todas as abas)
+# Filtros (logo abaixo das abas — globais)
 # ==========================
 
-with st.container():
+filters_slot = st.empty()
+with filters_slot.container():
     df_all = load_all(DATA_DIR_DEFAULT)
     if df_all.empty:
-        st.warning("Nenhum arquivo lido. Verifique a pasta `data/`.")
+        st.warning("Nenhum arquivo lido. Verifique a pasta `data`.")
         st.stop()
 
     min_d = df_all["BUSCA_DATETIME"].dropna().min()
@@ -228,12 +229,12 @@ with st.container():
     trecho_opts = sorted([str(x) for x in df_all["TRECHO"].dropna().unique() if str(x).strip()])
     hora_opts   = sorted([int(x) for x in df_all["HORA_HH"].dropna().unique()])
 
-    # Vazio = TODOS (não mostra um monte de chips marcados)
+    # Vazio = TODOS (sem chips marcados)
     advp_sel   = c3.multiselect("ADVP", options=advp_opts, default=[], placeholder="Todos")
     trecho_sel = c4.multiselect("Trechos", options=trecho_opts, default=[], placeholder="Todos")
     hora_sel   = c5.multiselect("Hora da busca", options=hora_opts, default=[], placeholder="Todas")
 
-# Aplica filtros globais (vazio = todos)
+# Aplica filtros globais
 mask = pd.Series(True, index=df_all.index)
 if d_ini and d_fim:
     d0, d1 = pd.to_datetime(d_ini), pd.to_datetime(d_fim)
@@ -252,7 +253,7 @@ st.caption(
 )
 
 # ======================================================
-# Helpers de gráfico — eixo X horizontal, rótulos e nota
+# Helpers de gráfico (eixo X horizontal + rótulos + nota)
 # ======================================================
 
 def _x(enc: str):
@@ -357,7 +358,7 @@ with abas[0]:
         chart_bar(by_trecho, "TRECHO:N", "TOTAL_MED:Q", "Top 15 trechos por preço mediano (TOTAL)",
                   "Trechos com maior mediana de TOTAL no período filtrado.")
 
-        # 5) Histograma de preços (TOTAL) — com BIN explícito
+        # 5) Histograma de preços (TOTAL)
         df_h = df.copy()
         df_h["BIN"] = pd.cut(df_h["TOTAL"], bins=20)
         hist = df_h.groupby("BIN", as_index=False)["TOTAL"].count().rename(columns={"TOTAL":"QTDE"})
@@ -380,7 +381,7 @@ with abas[0]:
         st.altair_chart(ch, use_container_width=True)
         st.caption("Dispersão entre TARIFA e TX DE EMBARQUE (amostra de até 5k pontos).")
 
-        # 7) Menor preço por Trecho x ADVP
+        # 7) Menor preço por Trecho x ADVP (tabela resumida)
         min_tbl = (
             df.groupby(["TRECHO","ADVP"], as_index=False)
               .agg(TOTAL_MIN=("TOTAL","min"), TARIFA_MIN=("TARIFA","min"), EXEMPLO_DATA=("BUSCA_DATETIME","max"))
