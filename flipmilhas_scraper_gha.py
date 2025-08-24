@@ -206,7 +206,10 @@ def setup_driver(headless: bool = True):
     options.add_argument("--disable-notifications")
 
     # Selenium Manager resolve o driver automaticamente.
-    driver = webdriver.Chrome(service=ChromeService(), options=options)
+    driver_path = os.getenv("CHROMEDRIVER_PATH")
+    service = ChromeService(executable_path=driver_path) if driver_path and os.path.exists(driver_path) else ChromeService()
+    driver = webdriver.Chrome(service=service, options=options)
+    logging.info("Chrome binary: %s | chromedriver: %s", getattr(options, "binary_location", None), (driver_path or "selenium-manager"))
     wait = WebDriverWait(driver, 15)
     return driver, wait
 
