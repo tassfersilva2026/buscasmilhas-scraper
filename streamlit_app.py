@@ -12,7 +12,7 @@ import altair as alt
 # ==========================
 st.set_page_config(page_title="Painel de Concorrência — Flip/Capo/Max/123", layout="wide")
 
-# Tema: cinza + amarelo
+# Paleta cinza + amarelo
 AMARELO = "#F2C94C"
 CINZA_TXT = "#333333"
 CINZA_BG  = "#F7F7F7"
@@ -20,10 +20,9 @@ CINZA_BG  = "#F7F7F7"
 st.markdown(
     f"""
     <style>
-      .block-container {{ padding-top: 0.5rem; }}
+      .block-container {{ padding-top: 0.6rem; }}
       h1, h2, h3, h4, h5, h6 {{ color: {CINZA_TXT}; }}
       .kpi .stMetric {{ background:{CINZA_BG}; border-radius:12px; padding:10px; }}
-      .viewbox {{ border:1px solid #eee; border-radius:12px; padding:12px; margin-bottom:14px; }}
     </style>
     """,
     unsafe_allow_html=True,
@@ -50,7 +49,7 @@ def find_data_dir(start: Path) -> str:
 DATA_DIR_DEFAULT = find_data_dir(Path(__file__).resolve())
 
 # ==========================
-# Funções utilitárias de leitura/normalização
+# Leitura e normalização
 # ==========================
 
 @st.cache_data(show_spinner=False)
@@ -106,11 +105,9 @@ def _read_one(path: str, mtime: float) -> pd.DataFrame:
     else:
         return pd.DataFrame()
 
-    # Padroniza nomes
     colmap = {c: re.sub(r"\s+", " ", str(c)).strip().upper() for c in df.columns}
     df = df.rename(columns=colmap)
 
-    # Sinônimos
     ren = {
         "CIA": "CIA DO VOO",
         "CIA DO VÔO": "CIA DO VOO",
@@ -123,7 +120,6 @@ def _read_one(path: str, mtime: float) -> pd.DataFrame:
         if k in df.columns and v not in df.columns:
             df = df.rename(columns={k: v})
 
-    # Garante colunas
     required = [
         "DATA DA BUSCA", "HORA DA BUSCA", "TRECHO",
         "DATA PARTIDA", "HORA DA PARTIDA", "DATA CHEGADA", "HORA DA CHEGADA",
@@ -133,11 +129,9 @@ def _read_one(path: str, mtime: float) -> pd.DataFrame:
         if c not in df.columns:
             df[c] = np.nan
 
-    # Números
     for c in ["TARIFA", "TX DE EMBARQUE", "TOTAL"]:
         df[c] = _to_float_series(df[c])
 
-    # Datetimes
     def combo_dt(dcol: str, tcol: str) -> pd.Series:
         d = pd.to_datetime(df[dcol].astype(str).str.strip(), dayfirst=True, errors="coerce")
         t = pd.to_datetime(df[tcol].astype(str).str.strip(), errors="coerce")
@@ -151,12 +145,10 @@ def _read_one(path: str, mtime: float) -> pd.DataFrame:
     df["ADVP"] = (df["PARTIDA_DATETIME"].dt.normalize() - df["BUSCA_DATETIME"].dt.normalize()).dt.days
     df["HORA_HH"] = df["BUSCA_DATETIME"].dt.hour
 
-    # Metadados
     df["ARQUIVO"] = p.name
     df["CAMINHO"] = str(p)
     df["EMPRESA"] = detect_empresa_from_filename(p.name)
 
-    # Ordenação de colunas
     base = [
         "BUSCA_DATETIME", "DATA DA BUSCA", "HORA DA BUSCA", "HORA_HH",
         "TRECHO", "CIA DO VOO", "ADVP",
@@ -207,9 +199,10 @@ abas = st.tabs(["FLIPMILHAS", "CAPO VIAGENS", "MAXMILHAS", "123MILHAS"])
 
 filters_slot = st.empty()
 with filters_slot.container():
-    df_all = load_all(DATA_DIR_DEFAULT)
+    with st.spinner("Lendo planilhas da pasta data/…"):
+        df_all = load_all(DATA_DIR_DEFAULT)
     if df_all.empty:
-        st.warning("Nenhum arquivo lido. Verifique a pasta `data`.")
+        st.info("Nenhum arquivo lido. Verifique a pasta `data/`.")
         st.stop()
 
     min_d = df_all["BUSCA_DATETIME"].dropna().min()
@@ -260,8 +253,7 @@ def _x(enc: str):
     return alt.X(enc, axis=alt.Axis(labelAngle=0, labelOverlap=True))
 
 def _y(enc: str):
-    # preços sem casas decimais
-    return alt.Y(enc, axis=alt.Axis(format=".0f"))
+    return alt.Y(enc, axis=alt.Axis(format=".0f"))  # sem casas decimais
 
 
 def chart_line(df: pd.DataFrame, x: str, y: str, title: str, note: str):
@@ -318,7 +310,6 @@ with abas[0]:
     if df.empty:
         st.info("Sem dados para os filtros atuais.")
     else:
-        # KPIs (sem casas decimais)
         k1, k2, k3, k4 = st.columns(4)
         with k1: st.metric("Registros", f"{len(df):,}".replace(",", "."))
         with k2: st.metric("Preço mediano (TOTAL)", fmt_moeda0(df["TOTAL"].median()))
@@ -381,7 +372,7 @@ with abas[0]:
         st.altair_chart(ch, use_container_width=True)
         st.caption("Dispersão entre TARIFA e TX DE EMBARQUE (amostra de até 5k pontos).")
 
-        # 7) Menor preço por Trecho x ADVP (tabela resumida)
+        # 7) Menor preço por Trecho x ADVP
         min_tbl = (
             df.groupby(["TRECHO","ADVP"], as_index=False)
               .agg(TOTAL_MIN=("TOTAL","min"), TARIFA_MIN=("TARIFA","min"), EXEMPLO_DATA=("BUSCA_DATETIME","max"))
