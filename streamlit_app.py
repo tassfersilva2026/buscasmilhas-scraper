@@ -187,11 +187,11 @@ def load_all(data_dir: str) -> pd.DataFrame:
     return df
 
 
-def fmt_moeda(v) -> str:
+def fmt_moeda0(v) -> str:
     try:
         if pd.isna(v):
             return "-"
-        return f"R$ {float(v):,.2f}".replace(",", "_").replace(".", ",").replace("_", ".")
+        return "R$ " + f"{int(round(float(v))):,}".replace(",", ".")
     except Exception:
         return "-"
 
@@ -228,6 +228,7 @@ with st.container():
     trecho_opts = sorted([str(x) for x in df_all["TRECHO"].dropna().unique() if str(x).strip()])
     hora_opts   = sorted([int(x) for x in df_all["HORA_HH"].dropna().unique()])
 
+    # Vazio = TODOS (não mostra um monte de chips marcados)
     advp_sel   = c3.multiselect("ADVP", options=advp_opts, default=[], placeholder="Todos")
     trecho_sel = c4.multiselect("Trechos", options=trecho_opts, default=[], placeholder="Todos")
     hora_sel   = c5.multiselect("Hora da busca", options=hora_opts, default=[], placeholder="Todas")
@@ -251,27 +252,31 @@ st.caption(
 )
 
 # ======================================================
-# Helpers de gráfico (legenda horizontal + rótulos + nota)
+# Helpers de gráfico — eixo X horizontal, rótulos e nota
 # ======================================================
 
-def _apply_hlegend(color_enc):
-    return color_enc.legend(orient="top", direction="horizontal")
+def _x(enc: str):
+    return alt.X(enc, axis=alt.Axis(labelAngle=0, labelOverlap=True))
+
+def _y(enc: str):
+    # preços sem casas decimais
+    return alt.Y(enc, axis=alt.Axis(format=".0f"))
 
 
-def chart_line(df: pd.DataFrame, x: str, y: str, title: str, note: str, fmt: str = ",.0f"):
-    base = alt.Chart(df).encode(x=x, y=y)
+def chart_line(df: pd.DataFrame, x: str, y: str, title: str, note: str):
+    base = alt.Chart(df).encode(x=_x(x), y=_y(y))
     line = base.mark_line(color=AMARELO)
     pts  = base.mark_point(color=AMARELO)
-    txt  = base.mark_text(dy=-8, color="#666", size=10).encode(text=alt.Text(y, format=fmt))
+    txt  = base.mark_text(dy=-8, color="#666", size=10).encode(text=alt.Text(y, format=".0f"))
     ch   = (line + pts + txt).properties(title=title, height=300)
     st.altair_chart(ch, use_container_width=True)
     st.caption(note)
 
 
-def chart_bar(df: pd.DataFrame, x: str, y: str, title: str, note: str, fmt: str = ",.0f"):
-    base = alt.Chart(df).encode(x=x, y=y)
+def chart_bar(df: pd.DataFrame, x: str, y: str, title: str, note: str):
+    base = alt.Chart(df).encode(x=_x(x), y=_y(y))
     bar  = base.mark_bar(color=AMARELO)
-    txt  = base.mark_text(dy=-6, color="#666", size=10).encode(text=alt.Text(y, format=fmt))
+    txt  = base.mark_text(dy=-6, color="#666", size=10).encode(text=alt.Text(y, format=".0f"))
     ch   = (bar + txt).properties(title=title, height=320)
     st.altair_chart(ch, use_container_width=True)
     st.caption(note)
@@ -282,8 +287,8 @@ def chart_heatmap(df: pd.DataFrame, x: str, y: str, z: str, title: str, note: st
         alt.Chart(df)
         .mark_rect()
         .encode(
-            x=x,
-            y=y,
+            x=_x(x),
+            y=_y(y),
             color=alt.Color(z, scale=alt.Scale(range=["#EEEEEE", AMARELO])).legend(orient="top", direction="horizontal"),
             tooltip=list(df.columns),
         )
@@ -297,7 +302,7 @@ def chart_box(df: pd.DataFrame, x: str, y: str, title: str, note: str):
     ch = (
         alt.Chart(df)
         .mark_boxplot(color=AMARELO)
-        .encode(x=x, y=y)
+        .encode(x=_x(x), y=_y(y))
         .properties(height=320, title=title)
     )
     st.altair_chart(ch, use_container_width=True)
@@ -312,12 +317,12 @@ with abas[0]:
     if df.empty:
         st.info("Sem dados para os filtros atuais.")
     else:
-        # KPIs
+        # KPIs (sem casas decimais)
         k1, k2, k3, k4 = st.columns(4)
         with k1: st.metric("Registros", f"{len(df):,}".replace(",", "."))
-        with k2: st.metric("Preço mediano (TOTAL)", fmt_moeda(df["TOTAL"].median()))
-        with k3: st.metric("Tarifa mediana", fmt_moeda(df["TARIFA"].median()))
-        with k4: st.metric("Tx embarque mediana", fmt_moeda(df["TX DE EMBARQUE"].median()))
+        with k2: st.metric("Preço mediano (TOTAL)", fmt_moeda0(df["TOTAL"].median()))
+        with k3: st.metric("Tarifa mediana", fmt_moeda0(df["TARIFA"].median()))
+        with k4: st.metric("Tx embarque mediana", fmt_moeda0(df["TX DE EMBARQUE"].median()))
 
         # 1) Evolução diária (mediana TOTAL)
         daily = (
@@ -326,12 +331,12 @@ with abas[0]:
               .rename(columns={"TOTAL":"TOTAL_MED"})
         )
         chart_line(daily, "DIA:T", "TOTAL_MED:Q", "Evolução diária do preço mediano (TOTAL)",
-                   "Série temporal da mediana diária do valor TOTAL.", fmt=", .0f")
+                   "Série temporal da mediana diária do valor TOTAL.")
 
         # 2) Mediana por ADVP
         by_advp = df.groupby("ADVP", as_index=False)["TOTAL"].median().rename(columns={"TOTAL":"TOTAL_MED"})
         chart_bar(by_advp, "ADVP:O", "TOTAL_MED:Q", "Preço mediano por ADVP",
-                  "Barra com a mediana de TOTAL para cada janela ADVP (dias).", fmt=", .0f")
+                  "Mediana de TOTAL para cada janela ADVP (dias).")
 
         # 3) Heatmap ADVP x Hora (mediana TOTAL)
         heat = (
@@ -340,7 +345,7 @@ with abas[0]:
         )
         chart_heatmap(heat, "HORA_HH:O", "ADVP:O", "TOTAL_MED:Q",
                       "Mapa de calor: Hora x ADVP (mediana TOTAL)",
-                      "Intensidade representa a mediana de TOTAL por hora da busca e ADVP.")
+                      "Intensidade = mediana de TOTAL por hora da busca e ADVP.")
 
         # 4) Top 15 trechos pelo preço mediano
         by_trecho = (
@@ -352,10 +357,10 @@ with abas[0]:
         chart_bar(by_trecho, "TRECHO:N", "TOTAL_MED:Q", "Top 15 trechos por preço mediano (TOTAL)",
                   "Trechos com maior mediana de TOTAL no período filtrado.")
 
-        # 5) Histograma de preços (TOTAL) — bugfix com coluna BIN
-        df = df.copy()
-        df["BIN"] = pd.cut(df["TOTAL"], bins=20)
-        hist = df.groupby("BIN", as_index=False)["TOTAL"].count().rename(columns={"TOTAL":"QTDE"})
+        # 5) Histograma de preços (TOTAL) — com BIN explícito
+        df_h = df.copy()
+        df_h["BIN"] = pd.cut(df_h["TOTAL"], bins=20)
+        hist = df_h.groupby("BIN", as_index=False)["TOTAL"].count().rename(columns={"TOTAL":"QTDE"})
         hist["FAIXA"] = hist["BIN"].astype(str)
         chart_bar(hist, "FAIXA:N", "QTDE:Q", "Distribuição de preços (TOTAL)",
                   "Contagem de ocorrências de TOTAL por faixa de preço.")
@@ -365,18 +370,17 @@ with abas[0]:
         ch = (
             alt.Chart(samp)
             .mark_circle(color=AMARELO, opacity=0.5)
-            .encode(x="TARIFA:Q", y="TX DE EMBARQUE:Q",
-                    tooltip=["TOTAL","TARIFA","TX DE EMBARQUE","TRECHO","ADVP","HORA_HH","BUSCA_DATETIME"])
+            .encode(
+                x=alt.X("TARIFA:Q", axis=alt.Axis(format=".0f", labelAngle=0)),
+                y=alt.Y("TX DE EMBARQUE:Q", axis=alt.Axis(format=".0f")),
+                tooltip=["TOTAL","TARIFA","TX DE EMBARQUE","TRECHO","ADVP","HORA_HH","BUSCA_DATETIME"],
+            )
             .properties(height=320, title="Tarifa vs Taxa de embarque (amostra)")
         )
         st.altair_chart(ch, use_container_width=True)
         st.caption("Dispersão entre TARIFA e TX DE EMBARQUE (amostra de até 5k pontos).")
 
-        # 7) Tabela: últimas 50 linhas
-        st.subheader("Últimas 50 buscas")
-        st.dataframe(df.sort_values("BUSCA_DATETIME", ascending=False).head(50), use_container_width=True, hide_index=True)
-
-        # 8) Menor preço por Trecho x ADVP
+        # 7) Menor preço por Trecho x ADVP
         min_tbl = (
             df.groupby(["TRECHO","ADVP"], as_index=False)
               .agg(TOTAL_MIN=("TOTAL","min"), TARIFA_MIN=("TARIFA","min"), EXEMPLO_DATA=("BUSCA_DATETIME","max"))
@@ -386,7 +390,7 @@ with abas[0]:
         st.caption("Menor TOTAL registrado por trecho e ADVP, com data de exemplo da última observação.")
         st.dataframe(min_tbl, use_container_width=True, hide_index=True)
 
-        # 9) Maiores variações d/d por Trecho (mediana TOTAL)
+        # 8) Maiores variações d/d por Trecho (mediana TOTAL)
         dd = (
             df.assign(DIA=df["BUSCA_DATETIME"].dt.date)
               .groupby(["TRECHO","DIA"], as_index=False)["TOTAL"].median()
@@ -398,14 +402,19 @@ with abas[0]:
         st.caption("Variação percentual diária do TOTAL mediano por trecho; top 20 maiores altas.")
         st.dataframe(var_tbl, use_container_width=True, hide_index=True)
 
-        # 10) Boxplot TOTAL por Trecho (top 10 por contagem)
+        # 9) Boxplot TOTAL por Trecho (top 10 por contagem)
         top10 = df["TRECHO"].value_counts().head(10).index.tolist()
         box_df = df[df["TRECHO"].isin(top10)]
         chart_box(box_df, "TRECHO:N", "TOTAL:Q", "Boxplot de TOTAL por Trecho (top 10)",
                   "Distribuição do TOTAL por trecho com maior número de registros.")
 
+        # 10) Mediana por hora (TOTAL)
+        by_hora = df.groupby("HORA_HH", as_index=False)["TOTAL"].median().rename(columns={"TOTAL":"TOTAL_MED"})
+        chart_bar(by_hora, "HORA_HH:O", "TOTAL_MED:Q", "Preço mediano por hora da busca",
+                  "Mediana de TOTAL por hora do dia (0..23).")
+
 # ==========================
-# Demais abas — placeholders para você plugar as visões
+# Demais abas — placeholders
 # ==========================
 with abas[1]:
     st.subheader("CAPO VIAGENS")
