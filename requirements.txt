@@ -1,2 +1,5 @@
-selenium>=4.25.0
+streamlit
+pandas
+numpy
 openpyxl
+xlsxwriter
