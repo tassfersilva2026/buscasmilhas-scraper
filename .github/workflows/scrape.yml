@@ -2,7 +2,7 @@ name: scrape-flipmilhas
 
 on:
   schedule:
-    - cron: "*/30 * * * *"        # a cada 30 min (em UTC; como é de 30/30, ok)
+    - cron: "*/30 * * * *"
   workflow_dispatch:
 
 jobs:
@@ -11,7 +11,7 @@ jobs:
     permissions:
       contents: write
     env:
-      TZ: America/Sao_Paulo       # datas/horas locais nos passos (date, git env)
+      TZ: America/Sao_Paulo
     concurrency:
       group: scrape-commit
       cancel-in-progress: false
@@ -25,14 +25,27 @@ jobs:
         with:
           python-version: "3.12"
 
-      # Instala o Chrome e expõe o caminho em steps.chrome.outputs.chrome-path
       - uses: browser-actions/setup-chrome@v1
         id: chrome
 
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          # tenta requirements.txt se existir…
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          # …e garante explicitamente os essenciais:
+          python -m pip install "selenium>=4.24.0" "openpyxl>=3.1.2"
+
+      - name: Sanity check (mostra versões)
+        run: |
+          python - << 'PY'
+          import sys
+          import importlib
+          for m in ("selenium", "openpyxl"):
+              mod = importlib.import_module(m)
+              print(m, getattr(mod, "__version__", ""))
+          print("python", sys.version)
+          PY
 
       - name: Run scraper (gera output/FLIPMILHAS.xlsx na raiz)
         env:
@@ -43,7 +56,7 @@ jobs:
       - name: Commit cópia com timestamp local em data/
         run: |
           mkdir -p data
-          ts=$(date +'%Y%m%d_%H%M%S')   # usa TZ=America/Sao_Paulo
+          ts=$(date +'%Y%m%d_%H%M%S')
           cp output/FLIPMILHAS.xlsx "data/FLIPMILHAS_${ts}.xlsx"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
