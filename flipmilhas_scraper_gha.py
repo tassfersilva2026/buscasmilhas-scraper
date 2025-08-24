@@ -3,7 +3,7 @@
 # Execução típica (local): python flipmilhas_scraper_gha.py --headless --once
 # Execução no GitHub Actions: ver .github/workflows/scrape.yml
 
-import os, re, time, argparse, logging, shutil, tempfile
+import os, re, time, argparse, logging
 from datetime import datetime, timedelta, date, time as dtime
 from decimal import Decimal, InvalidOperation
 from zoneinfo import ZoneInfo
@@ -13,8 +13,10 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.utils import get_column_letter
 from openpyxl.styles import Alignment
 
+# ===== Selenium (robusto p/ CI) =====
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service as ChromeService
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
@@ -174,12 +176,23 @@ def append_row(path: str, row_values: dict):
     wb.close()
 
 # ======= Selenium =======
-def setup_driver(headless=True):
+def _maybe_set_binary_location(opts: Options):
+    """Usa CHROME_PATH do GitHub Action se existir; caso contrário deixa Selenium Manager resolver."""
+    chrome_path = os.getenv("CHROME_PATH") or os.getenv("GOOGLE_CHROME_SHIM")
+    if chrome_path and os.path.exists(chrome_path):
+        opts.binary_location = chrome_path
+        logging.info("Usando CHROME_PATH: %s", chrome_path)
+
+
+def setup_driver(headless: bool = True):
     options = Options()
     if headless:
         options.add_argument("--headless=new")
         options.add_argument("--window-size=1920,1080")
         options.add_argument("--hide-scrollbars")
+    _maybe_set_binary_location(options)
+
+    # Flags que estabilizam no CI
     options.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
     options.add_experimental_option("useAutomationExtension", False)
     options.add_argument("--disable-blink-features=AutomationControlled")
@@ -191,15 +204,19 @@ def setup_driver(headless=True):
     options.add_argument("--no-default-browser-check")
     options.add_argument("--no-first-run")
     options.add_argument("--disable-notifications")
-    driver = webdriver.Chrome(options=options)  # Selenium Manager resolve driver/browser
+
+    # Selenium Manager resolve o driver automaticamente.
+    driver = webdriver.Chrome(service=ChromeService(), options=options)
     wait = WebDriverWait(driver, 15)
     return driver, wait
+
 
 def navigate_same_tab(driver, url):
     try:
         driver.execute_script("window.location.assign(arguments[0]);", url)
     except Exception:
         driver.get(url)
+
 
 def wait_for_buy_button_or_no_flights(driver, max_wait):
     start = time.time()
@@ -219,6 +236,7 @@ def wait_for_buy_button_or_no_flights(driver, max_wait):
                 pass
         time.sleep(1)
     return "timeout"
+
 
 def js_click_first_buy(driver) -> bool:
     try:
@@ -243,6 +261,7 @@ def js_click_first_buy(driver) -> bool:
     except TimeoutException:
         return False
 
+
 def wait_text(driver, xpath, timeout=12):
     try:
         el = WebDriverWait(driver, timeout).until(EC.presence_of_element_located((By.XPATH, xpath)))
@@ -250,12 +269,14 @@ def wait_text(driver, xpath, timeout=12):
     except TimeoutException:
         return None
 
+
 def wait_text_retry(driver, xpath, tries=3, delay=3):
     for _ in range(tries):
         txt = wait_text(driver, xpath, timeout=8)
         if txt: return txt
         time.sleep(delay)
     return None
+
 
 # ======= 1 passo (trecho+ADVP) =======
 def processar_trecho_advp(driver, base_tab, out_path, origin, destiny, advp, espera):
@@ -362,6 +383,7 @@ def processar_trecho_advp(driver, base_tab, out_path, origin, destiny, advp, esp
 
     return base_tab
 
+
 # ======= MAIN =======
 def main():
     parser = argparse.ArgumentParser(description="FlipMilhas scraper p/ GitHub Actions (1 ciclo opcional).")
@@ -382,7 +404,7 @@ def main():
                         datefmt="%H:%M:%S")
     logging.info("Saída: %s | Planilha: %s | Aba: %s | Headless: %s", args.saida, args.file, SHEET_NAME, args.headless)
 
-    driver, wait = setup_driver(headless=args.headless)
+    driver, _wait = setup_driver(headless=args.headless)
     base_tab = driver.current_window_handle
 
     try:
@@ -410,6 +432,7 @@ def main():
         try: driver.quit()
         except Exception: pass
         logging.info("Finalizado.")
+
 
 if __name__ == "__main__":
     main()
