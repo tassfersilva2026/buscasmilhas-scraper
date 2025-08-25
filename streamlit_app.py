@@ -318,7 +318,7 @@ def chart_cia_stack_trecho(df_emp: pd.DataFrame):
             ycenter="(datum.y0 + datum.y1)/2",
             label="format(datum.y1 - datum.y0, '.0%')",
         )
-        .mark_text(baseline="middle", align="center", size=22, fontWeight="bold", color="#FFFFFF")
+        .mark_text(baseline="middle", align="center", size=18, fontWeight="bold", color="#FFFFFF")
         .encode(
             x=x_axis("TRECHO:N"),
             y=alt.Y("ycenter:Q", scale=alt.Scale(domain=[0, 1.2])),
@@ -459,3 +459,4 @@ with abas[0]: render_empresa(view_all[view_all["EMPRESA"] == "FLIPMILHAS"].copy(
 with abas[1]: render_empresa(view_all[view_all["EMPRESA"] == "CAPO VIAGENS"].copy(), "CAPO")
 with abas[2]: render_empresa(view_all[view_all["EMPRESA"] == "MAXMILHAS"].copy(), "MAX")
 with abas[3]: render_empresa(view_all[view_all["EMPRESA"] == "123MILHAS"].copy(), "123")
+
