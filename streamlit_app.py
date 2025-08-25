@@ -13,14 +13,12 @@ import altair as alt
 # ==========================
 st.set_page_config(page_title="Painel de Concorrência — Flip/Capo/Max/123", layout="wide")
 
-# Paleta/cores
 AMARELO   = "#F2C94C"
 CINZA_TXT = "#333333"
 CINZA_BG  = "#F7F7F7"
-# Cores CIA (pedidas)
-GOL_COLOR   = "#F2994A"  # laranja
-AZUL_COLOR  = "#1F4E79"  # azul escuro
-LATAM_COLOR = "#8B0000"  # vermelho escuro
+GOL_COLOR   = "#F2994A"   # laranja
+AZUL_COLOR  = "#1F4E79"   # azul escuro
+LATAM_COLOR = "#8B0000"   # vermelho escuro
 
 st.markdown(
     f"""
@@ -29,11 +27,11 @@ st.markdown(
       h1, h2, h3, h4, h5, h6 {{ color: {CINZA_TXT}; }}
       .kpi .stMetric {{ background:{CINZA_BG}; border-radius:12px; padding:10px; }}
       .smallcap {{ color:#666; font-size:0.9rem; margin-top:-8px; }}
+      table td, table th {{ font-size: 0.95rem; }}
     </style>
     """,
     unsafe_allow_html=True,
 )
-
 st.markdown("<h4>Painel de Concorrência — Flip/Capo/Max/123</h4>", unsafe_allow_html=True)
 
 # ==========================
@@ -180,9 +178,14 @@ def load_all(data_dir: str) -> pd.DataFrame:
 
 def fmt_moeda0(v) -> str:
     try:
-        if pd.isna(v):
-            return "-"
+        if pd.isna(v): return "-"
         return "R$ " + f"{int(round(float(v))):,}".replace(",", ".")
+    except Exception:
+        return "-"
+
+def fmt_pontos(v: float) -> str:
+    try:
+        return f"{int(round(float(v))):,}".replace(",", ".")
     except Exception:
         return "-"
 
@@ -199,15 +202,13 @@ min_d = df_all["BUSCA_DATETIME"].dropna().min()
 max_d = df_all["BUSCA_DATETIME"].dropna().max()
 
 c1, c2, c3, c4, c5 = st.columns([1.2, 1.2, 1.6, 3.4, 1.6])
-d_ini = c1.date_input(
-    "Data inicial",
+d_ini = c1.date_input("Data inicial",
     value=min_d.date() if pd.notna(min_d) else None,
     min_value=min_d.date() if pd.notna(min_d) else None,
     max_value=max_d.date() if pd.notna(max_d) else None,
     format="DD/MM/YYYY",
 )
-d_fim = c2.date_input(
-    "Data final",
+d_fim = c2.date_input("Data final",
     value=max_d.date() if pd.notna(max_d) else None,
     min_value=min_d.date() if pd.notna(min_d) else None,
     max_value=max_d.date() if pd.notna(max_d) else None,
@@ -243,41 +244,46 @@ st.markdown("---")
 # ======================================================
 # Helpers de gráfico
 # ======================================================
-def x_axis(enc: str, title: Optional[str] = None):
-    return alt.X(enc, axis=alt.Axis(labelAngle=0, labelOverlap=True, title=title, labelFontWeight="bold", labelColor=CINZA_TXT))
+def x_axis(enc: str):
+    return alt.X(enc, axis=alt.Axis(labelAngle=0, labelOverlap=True, labelFontWeight="bold", labelColor=CINZA_TXT))
 
-def y_axis(enc: str, title: Optional[str] = None, domain=None):
-    return alt.Y(enc, axis=alt.Axis(format=".0f", title=title, labelFontWeight="bold", labelColor=CINZA_TXT),
+def y_axis(enc: str, domain=None):
+    return alt.Y(enc, axis=alt.Axis(format=".0f", labelFontWeight="bold", labelColor=CINZA_TXT),
                  scale=alt.Scale(domain=domain) if domain is not None else alt.Undefined)
 
 def barras_com_tendencia(df: pd.DataFrame, x_col: str, y_col: str, x_type: str, titulo: str, nota: str, sort=None, y_max: Optional[int]=None):
+    # prepara rótulo com milhar pontuado
+    df = df.copy()
+    df["_LABEL"] = df[y_col].apply(fmt_pontos)
+
     base = alt.Chart(df).encode(
-        x=x_axis(f"{x_col}:{x_type}", title=None) if sort is None else x_axis(f"{x_col}:{x_type}", title=None).sort(sort),
-        y=y_axis(f"{y_col}:Q", title=None, domain=[0, y_max] if y_max else None),
-        tooltip=[x_col, alt.Tooltip(y_col, format=".0f")],
+        x=(x_axis(f"{x_col}:{x_type}").sort(sort) if sort is not None else x_axis(f"{x_col}:{x_type}")),
+        y=y_axis(f"{y_col}:Q", domain=[0, y_max] if y_max else None),
+        tooltip=[x_col, alt.Tooltip(y_col, format=",.0f")],
     )
     bars = base.mark_bar(color=AMARELO)
-    labels = (
-        base.mark_text(
-            baseline="middle",
-            align="center",
-            fontWeight="bold",
-            dy=0,  # dentro da barra
-            color=CINZA_TXT,
-            size=18,  # tamanho pedido
-        ).encode(text=alt.Text(f"{y_col}:Q", format=".0f"))
+
+    # rótulo DENTRO da barra (desce 14px para ficar dentro do topo)
+    labels = alt.Chart(df).encode(
+        x=x_axis(f"{x_col}:{x_type}") if sort is None else x_axis(f"{x_col}:{x_type}").sort(sort),
+        y=y_axis(f"{y_col}:Q", domain=[0, y_max] if y_max else None),
+        text=alt.Text("_LABEL:N"),
+    ).mark_text(
+        baseline="top",      # ancora no topo…
+        align="center",
+        dy=14,               # …e empurra para DENTRO da barra
+        color=CINZA_TXT,
+        fontWeight="bold",
+        size=18,
     )
-    # Linha de tendência
-    if np.issubdtype(df[x_col].dtype, np.number):
-        line = (
-            alt.Chart(df)
-            .transform_loess(x_col, y_col, bandwidth=0.6)
-            .mark_line(color=CINZA_TXT, opacity=0.9)
-            .encode(x=x_axis(f"{x_col}:{x_type}"),
-                    y=y_axis("loess:Q", domain=[0, y_max] if y_max else None))
-        )
-    else:
-        line = base.mark_line(color=CINZA_TXT, opacity=0.9)
+
+    # Linha de tendência (loess)
+    line = (
+        alt.Chart(df)
+        .transform_loess(x_col, y_col, bandwidth=0.6)
+        .mark_line(color=CINZA_TXT, opacity=0.9)
+        .encode(x=x_axis(f"{x_col}:{x_type}"), y=y_axis("loess:Q", domain=[0, y_max] if y_max else None))
+    )
 
     ch = (bars + labels + line).properties(title=titulo, height=340)
     st.altair_chart(ch, use_container_width=True)
@@ -303,6 +309,7 @@ def chart_cia_stack_trecho(df_emp: pd.DataFrame):
     tot = grp.groupby("TRECHO", as_index=False)["COUNT"].sum().rename(columns={"COUNT":"TOT"})
     dfp = grp.merge(tot, on="TRECHO", how="left")
     dfp["PERC"] = dfp["COUNT"] / dfp["TOT"]
+    dfp["PERC_TXT"] = (dfp["PERC"]*100).round(0).astype(int).astype(str) + "%"
 
     base = alt.Chart(dfp).encode(
         x=x_axis("TRECHO:N"),
@@ -311,19 +318,23 @@ def chart_cia_stack_trecho(df_emp: pd.DataFrame):
                         scale=alt.Scale(domain=["GOL","AZUL","LATAM"],
                                         range=[GOL_COLOR, AZUL_COLOR, LATAM_COLOR]),
                         legend=alt.Legend(title="CIA")),
+        detail="CIA3:N",  # importante p/ o rótulo ficar por segmento (não 100%)
         tooltip=[alt.Tooltip("TRECHO:N"), alt.Tooltip("CIA3:N"),
                  alt.Tooltip("PERC:Q", format=".0%"), alt.Tooltip("COUNT:Q")]
     )
 
     bars = base.mark_bar()
+
+    # RÓTULO PRETO, CENTRALIZADO DENTRO DO SEGMENTO
     labels = base.mark_text(
         baseline="middle",
         align="center",
-        color=CINZA_TXT,
+        color="#000",
         fontWeight="bold",
-        size=18  # pedida
+        size=18
     ).encode(
-        text=alt.Text("PERC:Q", format=".0%"),
+        text=alt.Text("PERC_TXT:N"),
+        y=alt.Y("COUNT:Q", stack="normalize"),
     )
 
     ch = (bars + labels).properties(
@@ -342,37 +353,25 @@ def _fmt_currency_int(v):
         return "-"
 
 def _row_heat_css(row: pd.Series, price_cols: List[str]) -> pd.Series:
-    # gera CSS inline por linha só para colunas de preço
     vals = row[price_cols].astype(float).values
-    mask = ~np.isnan(vals)
     styles = {c: "" for c in row.index}
-    if mask.sum() <= 1:
-        # tudo igual ou apenas um valor -> cor neutra
-        for c in price_cols:
-            if not pd.isna(row[c]):
-                styles[c] = "background-color:#FFF7E0;"  # amarelo bem claro
+    if np.all(np.isnan(vals)):
         return pd.Series(styles)
 
-    vmin = np.nanmin(vals)
-    vmax = np.nanmax(vals)
-    rng  = max(vmax - vmin, 1e-9)
-
-    def interp_color(v):
-        # gradiente #FFF7E0 -> #F2C94C (claro -> amarelo)
-        c0 = (255, 247, 224)
-        c1 = (242, 201, 76)
+    vmin = np.nanmin(vals); vmax = np.nanmax(vals)
+    rng = max(vmax - vmin, 1e-9)
+    def interp(v):
+        c0 = (255, 247, 224)  # #FFF7E0
+        c1 = (242, 201,  76)  # #F2C94C
         t = (v - vmin) / rng
         r = int(c0[0] + t*(c1[0]-c0[0]))
         g = int(c0[1] + t*(c1[1]-c0[1]))
         b = int(c0[2] + t*(c1[2]-c0[2]))
         return f"background-color: rgb({r},{g},{b});"
-
     for c in price_cols:
         v = row[c]
-        if pd.isna(v):
-            styles[c] = ""
-        else:
-            styles[c] = interp_color(float(v))
+        if not pd.isna(v):
+            styles[c] = interp(float(v))
     return pd.Series(styles)
 
 def top3_tabela(df_emp: pd.DataFrame):
@@ -398,7 +397,9 @@ def top3_tabela(df_emp: pd.DataFrame):
         st.info("Sem dados para montar o Top 3 por trecho.")
         return
 
-    df_tbl = pd.DataFrame(rows).sort_values("TRECHO")
+    df_tbl = pd.DataFrame(rows).sort_values("TRECHO").reset_index(drop=True)
+    df_tbl.insert(0, "Nº", range(1, len(df_tbl)+1))  # contagem 1..N
+
     price_cols = ["PREÇO TOP 1", "PREÇO TOP 2", "PREÇO TOP 3"]
     fmt_map = {c: _fmt_currency_int for c in price_cols}
     fmt_map.update({"ADVP TOP 1":"{:.0f}", "ADVP TOP 2":"{:.0f}", "ADVP TOP 3":"{:.0f}"})
@@ -408,8 +409,7 @@ def top3_tabela(df_emp: pd.DataFrame):
     )
     st.subheader("Menor preço por Trecho × ADVP — Top 3 por trecho")
     st.caption("Para cada trecho, os 3 menores preços (e seus ADVPs). Cores por linha = mapa de calor horizontal.")
-    # st.write(sty) -> preferir st.dataframe não aplica Styler; usamos st.write mesmo
-    st.write(sty)
+    st.write(sty)  # Styler (sem matplotlib)
 
 # ======================================================
 # Renderização por empresa
@@ -429,42 +429,34 @@ def render_empresa(df_emp: pd.DataFrame, nome: str):
         preco_medio_val = df_emp["TOTAL"].sum() / max(len(df_emp), 1)
         st.metric("Preço médio (TOTAL)", fmt_moeda0(preco_medio_val))
 
-    # ===== Gráfico 1 — Preço médio por hora (0..23) =====
+    # 1) Preço médio por hora (0..23) — barras + linha de tendência, rótulo interno
     horas = pd.DataFrame({"HORA_HH": list(range(24))})
     by_hora = (
         df_emp.groupby("HORA_HH", as_index=False)["TOTAL"].mean()
               .rename(columns={"TOTAL": "PRECO_MEDIO"})
     )
     by_hora = horas.merge(by_hora, on="HORA_HH", how="left").fillna({"PRECO_MEDIO": 0})
-
     barras_com_tendencia(
-        by_hora,
-        x_col="HORA_HH",
-        y_col="PRECO_MEDIO",
-        x_type="O",
-        titulo="Evolução do preço médio por hora (0–23)",
-        nota="Barras = preço médio por hora (América/São Paulo). Linha = tendência.",
-        sort=list(range(24)),
-        y_max=3000,  # eixo Y máximo 3000
+        by_hora, "HORA_HH", "PRECO_MEDIO", "O",
+        "Evolução do preço médio por hora (0–23)",
+        "Barras internas, linha de tendência; eixo Y até 3000.",
+        sort=list(range(24)), y_max=3000,
     )
 
-    # ===== Gráfico 2 — Média de preços por ADVP =====
+    # 2) Média de preços por ADVP — barras + linha, rótulo interno
     by_advp = (
         df_emp.groupby("ADVP", as_index=False)["TOTAL"].mean()
               .rename(columns={"TOTAL": "PRECO_MEDIO"})
               .sort_values("ADVP")
     )
     barras_com_tendencia(
-        by_advp,
-        x_col="ADVP",
-        y_col="PRECO_MEDIO",
-        x_type="O",
-        titulo="Média de preços por ADVP",
-        nota="Rótulos internos; linha de tendência.",
+        by_advp, "ADVP", "PRECO_MEDIO", "O",
+        "Média de preços por ADVP",
+        "Rótulos internos; linha de tendência; eixo Y até 3000.",
         y_max=3000,
     )
 
-    # ===== Gráfico 3 — Média de preços por Trecho (Top 20) =====
+    # 3) Média de preços por Trecho (Top 20) — barras + linha, rótulo interno
     by_trecho = (
         df_emp.groupby("TRECHO", as_index=False)["TOTAL"].mean()
               .rename(columns={"TOTAL": "PRECO_MEDIO"})
@@ -472,20 +464,17 @@ def render_empresa(df_emp: pd.DataFrame, nome: str):
               .head(20)
     )
     barras_com_tendencia(
-        by_trecho,
-        x_col="TRECHO",
-        y_col="PRECO_MEDIO",
-        x_type="N",
-        titulo="Média de preços por Trecho (Top 20)",
-        nota="Ordenado pelo maior preço médio; rótulos dentro das barras.",
+        by_trecho, "TRECHO", "PRECO_MEDIO", "N",
+        "Média de preços por Trecho (Top 20)",
+        "Ordenado pelo maior preço médio; rótulos dentro das barras.",
         y_max=3000,
     )
 
-    # ===== NOVO — Participação da CIA do voo por Trecho (empilhado) =====
-    chart_cia_stack_trecho(df_emp)
-
-    # ===== Tabela Top 3 por trecho × ADVP (com mapa de calor CSS) =====
+    # 4) Tabela Top 3 por trecho × ADVP (vem ANTES do gráfico de CIAs)
     top3_tabela(df_emp)
+
+    # 5) (ÚLTIMO) Participação da CIA do voo por Trecho
+    chart_cia_stack_trecho(df_emp)
 
 # ==========================
 # Abas por empresa
@@ -494,12 +483,9 @@ abas = st.tabs(["FLIPMILHAS", "CAPO VIAGENS", "MAXMILHAS", "123MILHAS"])
 
 with abas[0]:
     render_empresa(view_all[view_all["EMPRESA"] == "FLIPMILHAS"].copy(), "FLIPMILHAS")
-
 with abas[1]:
     render_empresa(view_all[view_all["EMPRESA"] == "CAPO VIAGENS"].copy(), "CAPO VIAGENS")
-
 with abas[2]:
     render_empresa(view_all[view_all["EMPRESA"] == "MAXMILHAS"].copy(), "MAXMILHAS")
-
 with abas[3]:
     render_empresa(view_all[view_all["EMPRESA"] == "123MILHAS"].copy(), "123MILHAS")
