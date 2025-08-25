@@ -351,52 +351,52 @@ def top3_tabela(df_emp: pd.DataFrame, agg: str):
     fmt_map.update({"ADVP TOP 1":"{:.0f}","ADVP TOP 2":"{:.0f}","ADVP TOP 3":"{:.0f}"})
     sty = df_tbl.style.format(fmt_map, na_rep="-").apply(lambda r: _row_heat_css(r, price_cols), axis=1)
 
-    # título com o mesmo tamanho dos títulos dos gráficos
     st.markdown("<h5>Preço Top 3 preços por ADVP</h5>", unsafe_allow_html=True)
     st.write(sty)
 
 # ==========================
-# Render por empresa
+# Render por empresa (key único + eixo dinâmico)
 # ==========================
-def render_empresa(df_emp: pd.DataFrame):
-    # Toggle no lugar do título da aba (ligado = MENOR PREÇO)
-    menor_preco = st.toggle("Menor preço", value=True, help="Ligado: usa menor preço; Desligado: usa média. Vale para gráficos e tabela.")
+def render_empresa(df_emp: pd.DataFrame, key_suffix: str):
+    # Toggle com key único por aba
+    menor_preco = st.toggle(
+        "Menor preço",
+        value=True,
+        key=f"toggle_menor_preco_{key_suffix}",
+        help="Ligado: usa menor preço; Desligado: usa média. Vale para gráficos e tabela."
+    )
 
     if df_emp.empty:
         st.info("Sem dados para os filtros atuais."); return
+
+    # Limite dinâmico do eixo Y
+    y_max_lim = 1500 if menor_preco else 3000
 
     # KPIs
     k1, k2 = st.columns(2)
     with k1: st.metric("Buscas", f"{len(df_emp):,}".replace(",", "."))
     with k2:
-        if menor_preco:
-            preco_val = df_emp["TOTAL"].min()
-        else:
-            preco_val = df_emp["TOTAL"].mean()
-        st.metric("Preço", fmt_moeda0(preco_val))  # título ajustado
+        preco_val = df_emp["TOTAL"].min() if menor_preco else df_emp["TOTAL"].mean()
+        st.metric("Preço", fmt_moeda0(preco_val))
 
     # 1) Preço por hora
     horas = pd.DataFrame({"HORA_HH": list(range(24))})
     if menor_preco:
-        by_hora = (df_emp.groupby("HORA_HH", as_index=False)["TOTAL"].min()
-                        .rename(columns={"TOTAL":"PRECO"}))
+        by_hora = df_emp.groupby("HORA_HH", as_index=False)["TOTAL"].min().rename(columns={"TOTAL":"PRECO"})
     else:
-        by_hora = (df_emp.groupby("HORA_HH", as_index=False)["TOTAL"].mean()
-                        .rename(columns={"TOTAL":"PRECO"}))
+        by_hora = df_emp.groupby("HORA_HH", as_index=False)["TOTAL"].mean().rename(columns={"TOTAL":"PRECO"})
     by_hora = horas.merge(by_hora, on="HORA_HH", how="left").fillna({"PRECO":0})
     barras_com_tendencia(by_hora, "HORA_HH", "PRECO", "O",
                          "Preço por hora", x_title="HORA",
-                         y_max=3000, sort=list(range(24)))
+                         y_max=y_max_lim, sort=list(range(24)))
 
     # 2) Preço por ADVP
     if menor_preco:
-        by_advp = (df_emp.groupby("ADVP", as_index=False)["TOTAL"].min()
-                        .rename(columns={"TOTAL":"PRECO"}).sort_values("ADVP"))
+        by_advp = df_emp.groupby("ADVP", as_index=False)["TOTAL"].min().rename(columns={"TOTAL":"PRECO"}).sort_values("ADVP")
     else:
-        by_advp = (df_emp.groupby("ADVP", as_index=False)["TOTAL"].mean()
-                        .rename(columns={"TOTAL":"PRECO"}).sort_values("ADVP"))
+        by_advp = df_emp.groupby("ADVP", as_index=False)["TOTAL"].mean().rename(columns={"TOTAL":"PRECO"}).sort_values("ADVP")
     barras_com_tendencia(by_advp, "ADVP", "PRECO", "O",
-                         "Preço por ADVP", y_max=3000)
+                         "Preço por ADVP", y_max=y_max_lim)
 
     # 3) Preço Top 20 trechos
     if menor_preco:
@@ -408,9 +408,9 @@ def render_empresa(df_emp: pd.DataFrame):
                           .rename(columns={"TOTAL":"PRECO"})
                           .sort_values("PRECO", ascending=False).head(20))
     barras_com_tendencia(by_trecho, "TRECHO", "PRECO", "N",
-                         "Preço Top 20 trechos", y_max=3000)
+                         "Preço Top 20 trechos", y_max=y_max_lim)
 
-    # 4) Tabela Top 3 (usa o mesmo critério do toggle)
+    # 4) Tabela Top 3 (segue o toggle)
     top3_tabela(df_emp, agg="min" if menor_preco else "mean")
 
     # 5) (final) SHARE CIAS
@@ -420,7 +420,7 @@ def render_empresa(df_emp: pd.DataFrame):
 # Abas
 # ==========================
 abas = st.tabs(["FLIPMILHAS","CAPO VIAGENS","MAXMILHAS","123MILHAS"])
-with abas[0]: render_empresa(view_all[view_all["EMPRESA"] == "FLIPMILHAS"].copy())
-with abas[1]: render_empresa(view_all[view_all["EMPRESA"] == "CAPO VIAGENS"].copy())
-with abas[2]: render_empresa(view_all[view_all["EMPRESA"] == "MAXMILHAS"].copy())
-with abas[3]: render_empresa(view_all[view_all["EMPRESA"] == "123MILHAS"].copy())
+with abas[0]: render_empresa(view_all[view_all["EMPRESA"] == "FLIPMILHAS"].copy(), "FLIPMILHAS")
+with abas[1]: render_empresa(view_all[view_all["EMPRESA"] == "CAPO VIAGENS"].copy(), "CAPO")
+with abas[2]: render_empresa(view_all[view_all["EMPRESA"] == "MAXMILHAS"].copy(), "MAX")
+with abas[3]: render_empresa(view_all[view_all["EMPRESA"] == "123MILHAS"].copy(), "123")
