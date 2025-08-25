@@ -2,7 +2,6 @@
 from __future__ import annotations
 from pathlib import Path
 from typing import List, Optional
-import math
 import re
 import numpy as np
 import pandas as pd
@@ -155,19 +154,6 @@ def fmt_pontos(v: float) -> str:
     try: return f"{int(round(float(v))):,}".replace(",", ".")
     except Exception: return "-"
 
-# ============== utils p/ eixo dinâmico ==============
-def _nice_ceil(value: float, step: int = 50) -> int:
-    if not np.isfinite(value) or value <= 0: return step
-    return int(math.ceil(value / step) * step)
-
-def dynamic_limit(series: pd.Series, hard_cap: Optional[int]) -> int:
-    s = pd.to_numeric(series, errors="coerce")
-    vmax = float(np.nanmax(s.values)) if len(s) else 0.0
-    pad  = max(50.0, 0.10 * vmax)   # 10% ou 50
-    y    = _nice_ceil(vmax + pad, step=50)
-    if hard_cap is not None: y = min(y, int(hard_cap))
-    return max(y, 100)
-
 # ======================================================
 # FILTROS NO TOPO
 # ======================================================
@@ -257,15 +243,12 @@ def barras_com_tendencia(df: pd.DataFrame, x_col: str, y_col: str, x_type: str,
     st.altair_chart(ch, use_container_width=True)
 
 # ==========================
-# SHARE CIAS (stack normalizado + rótulos centrados e alinhados ao segmento)
+# SHARE CIAS (rótulos centralizados)
 # ==========================
 def chart_cia_stack_trecho(df_emp: pd.DataFrame):
-    """Barras empilhadas normalizadas (0–100%) com rótulos brancos e centralizados DENTRO de cada segmento."""
     if df_emp.empty:
-        st.info("Sem dados para os filtros atuais.")
-        return
+        st.info("Sem dados para os filtros atuais."); return
 
-    # Normaliza nomes das cias
     cia_raw = df_emp["CIA DO VOO"].astype(str).str.upper()
     df = df_emp.copy()
     df["CIA3"] = np.select(
@@ -274,61 +257,45 @@ def chart_cia_stack_trecho(df_emp: pd.DataFrame):
         default="OUTRAS",
     )
     df = df[df["CIA3"].isin(["AZUL", "GOL", "LATAM"])]
-    if df.empty:
-        st.info("Sem AZUL/GOL/LATAM para este filtro.")
-        return
 
-    base = alt.Chart(df)
+    grp = df.groupby(["TRECHO", "CIA3"], as_index=False).size().rename(columns={"size": "COUNT"})
+    tot = grp.groupby("TRECHO", as_index=False)["COUNT"].sum().rename(columns={"COUNT": "TOT"})
+    d = grp.merge(tot, on="TRECHO", how="left")
+    d["PERC"] = d["COUNT"] / d["TOT"]
 
-    # Barras empilhadas normalizadas — ordem fixa AZUL → GOL → LATAM
+    ordem = pd.Categorical(d["CIA3"], categories=["AZUL", "GOL", "LATAM"], ordered=True)
+    d = d.assign(CIA3=ordem).sort_values(["TRECHO", "CIA3"])
+    d["Y0"] = d.groupby("TRECHO")["PERC"].cumsum() - d["PERC"]
+    d["Y1"] = d.groupby("TRECHO")["PERC"].cumsum()
+    d["YCENTER"] = (d["Y0"] + d["Y1"]) / 2.0
+    d["PERC_TXT"] = (d["PERC"] * 100).round(0).astype(int).astype(str) + "%"
+
     bars = (
-        base.mark_bar()
+        alt.Chart(d)
+        .mark_bar()
         .encode(
             x=x_axis("TRECHO:N"),
-            y=alt.Y(
-                "count():Q",
-                stack="normalize",
-                axis=alt.Axis(format=".0%", title=""),
-                scale=alt.Scale(domain=[0, 1.2]),  # 120% para respiro
-            ),
-            color=alt.Color(
-                "CIA3:N",
-                scale=alt.Scale(
-                    domain=["AZUL", "GOL", "LATAM"],
-                    range=[AZUL_COLOR, GOL_COLOR, LATAM_COLOR],
-                ),
-                legend=alt.Legend(title="CIA"),
-            ),
-            order=alt.Order("CIA3:N", sort="ascending"),
+            y=alt.Y("Y0:Q", axis=alt.Axis(format=".0%", title=""), scale=alt.Scale(domain=[0, 1.2])),
+            y2="Y1:Q",
+            color=alt.Color("CIA3:N",
+                            scale=alt.Scale(domain=["AZUL","GOL","LATAM"], range=[AZUL_COLOR,GOL_COLOR,LATAM_COLOR]),
+                            legend=alt.Legend(title="CIA")),
+            tooltip=[alt.Tooltip("TRECHO:N"), alt.Tooltip("CIA3:N"),
+                     alt.Tooltip("PERC:Q", format=".0%"), alt.Tooltip("COUNT:Q")],
         )
     )
 
-    # Rótulos usando a MESMA pilha (y0/y1) para centralizar por segmento
-    text = (
-        base
-        .transform_aggregate(count="count()", groupby=["TRECHO", "CIA3"])
-        .transform_stack(
-            stack="count",
-            groupby=["TRECHO"],
-            sort=[alt.SortField("CIA3", order="ascending")],
-            as_=["y0", "y1"],
-            offset="normalize",
-        )
-        .transform_calculate(
-            ycenter="(datum.y0 + datum.y1)/2",
-            label="format(datum.y1 - datum.y0, '.0%')",
-        )
-        .mark_text(baseline="middle", align="center", size=22, fontWeight="bold", color="#FFFFFF")
-        .encode(
-            x=x_axis("TRECHO:N"),
-            y=alt.Y("ycenter:Q", scale=alt.Scale(domain=[0, 1.2])),
-            text="label:N",
-            detail="CIA3:N",
-        )
+    labels = (
+        alt.Chart(d)
+        .mark_text(baseline="middle", align="center", color="#fff", fontWeight="bold", size=18)
+        .encode(x=x_axis("TRECHO:N"),
+                y=alt.Y("YCENTER:Q", scale=alt.Scale(domain=[0, 1.2])),
+                text="PERC_TXT:N",
+                detail="CIA3:N")
     )
 
-    ch = (bars + text).properties(title="SHARE CIAS", height=380)
-    st.altair_chart(ch, use_container_width=True)
+    chart = (bars + labels).properties(title="SHARE CIAS", height=380)
+    st.altair_chart(chart, use_container_width=True)
 
 # ==========================
 # Tabela Top 3 (índice 1..N; sem coluna extra)
@@ -388,9 +355,10 @@ def top3_tabela(df_emp: pd.DataFrame, agg: str):
     st.write(sty)
 
 # ==========================
-# Render por empresa (toggle + eixos dinâmicos)
+# Render por empresa (key único + eixo dinâmico)
 # ==========================
 def render_empresa(df_emp: pd.DataFrame, key_suffix: str):
+    # Toggle com key único por aba
     menor_preco = st.toggle(
         "Menor preço",
         value=True,
@@ -401,11 +369,12 @@ def render_empresa(df_emp: pd.DataFrame, key_suffix: str):
     if df_emp.empty:
         st.info("Sem dados para os filtros atuais."); return
 
-    hard_cap = 1500 if menor_preco else 3000
+    # Limite dinâmico do eixo Y
+    y_max_lim = 1500 if menor_preco else 3000
 
     # KPIs
     k1, k2 = st.columns(2)
-    with k1: st.metric("Buscas", f"{len[df_emp]:,}".replace(",", ".")) if False else st.metric("Buscas", f"{len(df_emp):,}".replace(",", "."))
+    with k1: st.metric("Buscas", f"{len(df_emp):,}".replace(",", "."))
     with k2:
         preco_val = df_emp["TOTAL"].min() if menor_preco else df_emp["TOTAL"].mean()
         st.metric("Preço", fmt_moeda0(preco_val))
@@ -417,19 +386,17 @@ def render_empresa(df_emp: pd.DataFrame, key_suffix: str):
     else:
         by_hora = df_emp.groupby("HORA_HH", as_index=False)["TOTAL"].mean().rename(columns={"TOTAL":"PRECO"})
     by_hora = horas.merge(by_hora, on="HORA_HH", how="left").fillna({"PRECO":0})
-    y_max_hora = dynamic_limit(by_hora["PRECO"], hard_cap)
     barras_com_tendencia(by_hora, "HORA_HH", "PRECO", "O",
                          "Preço por hora", x_title="HORA",
-                         y_max=y_max_hora, sort=list(range(24)))
+                         y_max=y_max_lim, sort=list(range(24)))
 
     # 2) Preço por ADVP
     if menor_preco:
         by_advp = df_emp.groupby("ADVP", as_index=False)["TOTAL"].min().rename(columns={"TOTAL":"PRECO"}).sort_values("ADVP")
     else:
         by_advp = df_emp.groupby("ADVP", as_index=False)["TOTAL"].mean().rename(columns={"TOTAL":"PRECO"}).sort_values("ADVP")
-    y_max_advp = dynamic_limit(by_advp["PRECO"], hard_cap)
     barras_com_tendencia(by_advp, "ADVP", "PRECO", "O",
-                         "Preço por ADVP", y_max=y_max_advp)
+                         "Preço por ADVP", y_max=y_max_lim)
 
     # 3) Preço Top 20 trechos
     if menor_preco:
@@ -440,9 +407,8 @@ def render_empresa(df_emp: pd.DataFrame, key_suffix: str):
         by_trecho = (df_emp.groupby("TRECHO", as_index=False)["TOTAL"].mean()
                           .rename(columns={"TOTAL":"PRECO"})
                           .sort_values("PRECO", ascending=False).head(20))
-    y_max_trecho = dynamic_limit(by_trecho["PRECO"], hard_cap)
     barras_com_tendencia(by_trecho, "TRECHO", "PRECO", "N",
-                         "Preço Top 20 trechos", y_max=y_max_trecho)
+                         "Preço Top 20 trechos", y_max=y_max_lim)
 
     # 4) Tabela Top 3 (segue o toggle)
     top3_tabela(df_emp, agg="min" if menor_preco else "mean")
