@@ -232,7 +232,6 @@ def barras_com_tendencia(df: pd.DataFrame, x_col: str, y_col: str, x_type: str,
         fontWeight="bold", size=18,
     )
 
-    # Linha de tendência pontilhada
     line = (
         alt.Chart(df)
         .mark_line(color=CINZA_TXT, opacity=0.95, strokeDash=[6,4])
@@ -244,39 +243,33 @@ def barras_com_tendencia(df: pd.DataFrame, x_col: str, y_col: str, x_type: str,
     st.altair_chart(ch, use_container_width=True)
 
 # ==========================
-# SHARE CIAS (igual ao exemplo, rótulos centralizados)
+# SHARE CIAS (rótulos centralizados)
 # ==========================
 def chart_cia_stack_trecho(df_emp: pd.DataFrame):
     if df_emp.empty:
         st.info("Sem dados para os filtros atuais."); return
 
-    # Normaliza nome das cias
     cia_raw = df_emp["CIA DO VOO"].astype(str).str.upper()
     df = df_emp.copy()
     df["CIA3"] = np.select(
-        [cia_raw.str.contains("AZUL"),
-         cia_raw.str.contains("GOL"),
-         cia_raw.str.contains("LATAM")],
+        [cia_raw.str.contains("AZUL"), cia_raw.str.contains("GOL"), cia_raw.str.contains("LATAM")],
         ["AZUL", "GOL", "LATAM"],
         default="OUTRAS",
     )
     df = df[df["CIA3"].isin(["AZUL", "GOL", "LATAM"])]
 
-    # Shares por trecho
     grp = df.groupby(["TRECHO", "CIA3"], as_index=False).size().rename(columns={"size": "COUNT"})
     tot = grp.groupby("TRECHO", as_index=False)["COUNT"].sum().rename(columns={"COUNT": "TOT"})
     d = grp.merge(tot, on="TRECHO", how="left")
     d["PERC"] = d["COUNT"] / d["TOT"]
 
-    # Ordem e coordenadas do segmento
     ordem = pd.Categorical(d["CIA3"], categories=["AZUL", "GOL", "LATAM"], ordered=True)
     d = d.assign(CIA3=ordem).sort_values(["TRECHO", "CIA3"])
-    d["Y0"] = d.groupby("TRECHO")["PERC"].cumsum() - d["PERC"]   # base
-    d["Y1"] = d.groupby("TRECHO")["PERC"].cumsum()               # topo
-    d["YCENTER"] = (d["Y0"] + d["Y1"]) / 2.0                     # centro p/ rótulo
+    d["Y0"] = d.groupby("TRECHO")["PERC"].cumsum() - d["PERC"]
+    d["Y1"] = d.groupby("TRECHO")["PERC"].cumsum()
+    d["YCENTER"] = (d["Y0"] + d["Y1"]) / 2.0
     d["PERC_TXT"] = (d["PERC"] * 100).round(0).astype(int).astype(str) + "%"
 
-    # Barras empilhadas com eixo até 120%
     bars = (
         alt.Chart(d)
         .mark_bar()
@@ -284,26 +277,21 @@ def chart_cia_stack_trecho(df_emp: pd.DataFrame):
             x=x_axis("TRECHO:N"),
             y=alt.Y("Y0:Q", axis=alt.Axis(format=".0%", title=""), scale=alt.Scale(domain=[0, 1.2])),
             y2="Y1:Q",
-            color=alt.Color(
-                "CIA3:N",
-                scale=alt.Scale(domain=["AZUL", "GOL", "LATAM"], range=[AZUL_COLOR, GOL_COLOR, LATAM_COLOR]),
-                legend=alt.Legend(title="CIA"),
-            ),
+            color=alt.Color("CIA3:N",
+                            scale=alt.Scale(domain=["AZUL","GOL","LATAM"], range=[AZUL_COLOR,GOL_COLOR,LATAM_COLOR]),
+                            legend=alt.Legend(title="CIA")),
             tooltip=[alt.Tooltip("TRECHO:N"), alt.Tooltip("CIA3:N"),
                      alt.Tooltip("PERC:Q", format=".0%"), alt.Tooltip("COUNT:Q")],
         )
     )
 
-    # Rótulos centralizados DENTRO do segmento (brancos – como no print)
     labels = (
         alt.Chart(d)
         .mark_text(baseline="middle", align="center", color="#fff", fontWeight="bold", size=18)
-        .encode(
-            x=x_axis("TRECHO:N"),
-            y=alt.Y("YCENTER:Q", scale=alt.Scale(domain=[0, 1.2])),
-            text="PERC_TXT:N",
-            detail="CIA3:N",
-        )
+        .encode(x=x_axis("TRECHO:N"),
+                y=alt.Y("YCENTER:Q", scale=alt.Scale(domain=[0, 1.2])),
+                text="PERC_TXT:N",
+                detail="CIA3:N")
     )
 
     chart = (bars + labels).properties(title="SHARE CIAS", height=380)
@@ -332,13 +320,21 @@ def _row_heat_css(row: pd.Series, price_cols: List[str]) -> pd.Series:
         if not pd.isna(v): styles[c]=interp(float(v))
     return pd.Series(styles)
 
-def top3_tabela(df_emp: pd.DataFrame):
-    base_min = (df_emp.groupby(["TRECHO","ADVP"], as_index=False)["TOTAL"].min()
-                .rename(columns={"TOTAL":"PRECO_MIN"}))
+def top3_tabela(df_emp: pd.DataFrame, agg: str):
+    """Tabela Top 3 por trecho x ADVP usando 'min' ou 'mean' conforme toggle."""
+    if agg not in ("min", "mean"): agg = "min"
+
+    if agg == "min":
+        base = (df_emp.groupby(["TRECHO","ADVP"], as_index=False)["TOTAL"].min()
+                .rename(columns={"TOTAL":"VAL"}))
+    else:
+        base = (df_emp.groupby(["TRECHO","ADVP"], as_index=False)["TOTAL"].mean()
+                .rename(columns={"TOTAL":"VAL"}))
+
     rows=[]
-    for trecho, sub in base_min.groupby("TRECHO", sort=True):
-        top = sub.nsmallest(3, "PRECO_MIN").reset_index(drop=True)
-        vals = top["PRECO_MIN"].tolist(); advs = top["ADVP"].tolist()
+    for trecho, sub in base.groupby("TRECHO", sort=True):
+        top = sub.nsmallest(3, "VAL").reset_index(drop=True)
+        vals = top["VAL"].tolist(); advs = top["ADVP"].tolist()
         rows.append({"TRECHO":trecho,
                      "PREÇO TOP 1": vals[0] if len(vals)>0 else np.nan, "ADVP TOP 1":advs[0] if len(advs)>0 else np.nan,
                      "PREÇO TOP 2": vals[1] if len(vals)>1 else np.nan, "ADVP TOP 2":advs[1] if len(advs)>1 else np.nan,
@@ -347,57 +343,75 @@ def top3_tabela(df_emp: pd.DataFrame):
         st.info("Sem dados para montar o Top 3 por trecho."); return
 
     df_tbl = pd.DataFrame(rows).sort_values("TRECHO").reset_index(drop=True)
-    df_tbl.index = pd.RangeIndex(start=1, stop=len(df_tbl)+1, step=1)  # 1..N
-    df_tbl.index.name = None  # sem cabeçalho no índice
+    df_tbl.index = pd.RangeIndex(start=1, stop=len(df_tbl)+1, step=1)
+    df_tbl.index.name = None
 
     price_cols = ["PREÇO TOP 1","PREÇO TOP 2","PREÇO TOP 3"]
     fmt_map = {c:_fmt_currency_int for c in price_cols}
     fmt_map.update({"ADVP TOP 1":"{:.0f}","ADVP TOP 2":"{:.0f}","ADVP TOP 3":"{:.0f}"})
     sty = df_tbl.style.format(fmt_map, na_rep="-").apply(lambda r: _row_heat_css(r, price_cols), axis=1)
 
-    st.subheader("Menor preço por Trecho × ADVP — Top 3 por trecho")
+    # título com o mesmo tamanho dos títulos dos gráficos
+    st.markdown("<h5>Preço Top 3 preços por ADVP</h5>", unsafe_allow_html=True)
     st.write(sty)
 
 # ==========================
 # Render por empresa
 # ==========================
-def render_empresa(df_emp: pd.DataFrame, nome: str):
-    st.subheader(nome)
+def render_empresa(df_emp: pd.DataFrame):
+    # Toggle no lugar do título da aba (ligado = MENOR PREÇO)
+    menor_preco = st.toggle("Menor preço", value=True, help="Ligado: usa menor preço; Desligado: usa média. Vale para gráficos e tabela.")
+
     if df_emp.empty:
         st.info("Sem dados para os filtros atuais."); return
 
+    # KPIs
     k1, k2 = st.columns(2)
     with k1: st.metric("Buscas", f"{len(df_emp):,}".replace(",", "."))
     with k2:
-        preco_medio_val = df_emp["TOTAL"].sum() / max(len(df_emp), 1)
-        st.metric("Preço médio", fmt_moeda0(preco_medio_val))
+        if menor_preco:
+            preco_val = df_emp["TOTAL"].min()
+        else:
+            preco_val = df_emp["TOTAL"].mean()
+        st.metric("Preço", fmt_moeda0(preco_val))  # título ajustado
 
-    # 1) Preço médio por hora
+    # 1) Preço por hora
     horas = pd.DataFrame({"HORA_HH": list(range(24))})
-    by_hora = (df_emp.groupby("HORA_HH", as_index=False)["TOTAL"].mean()
-                    .rename(columns={"TOTAL":"PRECO_MEDIO"}))
-    by_hora = horas.merge(by_hora, on="HORA_HH", how="left").fillna({"PRECO_MEDIO":0})
-    barras_com_tendencia(by_hora, "HORA_HH", "PRECO_MEDIO", "O",
-                         "Preço médio por hora", x_title="HORA",
+    if menor_preco:
+        by_hora = (df_emp.groupby("HORA_HH", as_index=False)["TOTAL"].min()
+                        .rename(columns={"TOTAL":"PRECO"}))
+    else:
+        by_hora = (df_emp.groupby("HORA_HH", as_index=False)["TOTAL"].mean()
+                        .rename(columns={"TOTAL":"PRECO"}))
+    by_hora = horas.merge(by_hora, on="HORA_HH", how="left").fillna({"PRECO":0})
+    barras_com_tendencia(by_hora, "HORA_HH", "PRECO", "O",
+                         "Preço por hora", x_title="HORA",
                          y_max=3000, sort=list(range(24)))
 
     # 2) Preço por ADVP
-    by_advp = (df_emp.groupby("ADVP", as_index=False)["TOTAL"].mean()
-                    .rename(columns={"TOTAL":"PRECO_MEDIO"})
-                    .sort_values("ADVP"))
-    barras_com_tendencia(by_advp, "ADVP", "PRECO_MEDIO", "O",
+    if menor_preco:
+        by_advp = (df_emp.groupby("ADVP", as_index=False)["TOTAL"].min()
+                        .rename(columns={"TOTAL":"PRECO"}).sort_values("ADVP"))
+    else:
+        by_advp = (df_emp.groupby("ADVP", as_index=False)["TOTAL"].mean()
+                        .rename(columns={"TOTAL":"PRECO"}).sort_values("ADVP"))
+    barras_com_tendencia(by_advp, "ADVP", "PRECO", "O",
                          "Preço por ADVP", y_max=3000)
 
     # 3) Preço Top 20 trechos
-    by_trecho = (df_emp.groupby("TRECHO", as_index=False)["TOTAL"].mean()
-                      .rename(columns={"TOTAL":"PRECO_MEDIO"})
-                      .sort_values("PRECO_MEDIO", ascending=False)
-                      .head(20))
-    barras_com_tendencia(by_trecho, "TRECHO", "PRECO_MEDIO", "N",
+    if menor_preco:
+        by_trecho = (df_emp.groupby("TRECHO", as_index=False)["TOTAL"].min()
+                          .rename(columns={"TOTAL":"PRECO"})
+                          .sort_values("PRECO", ascending=False).head(20))
+    else:
+        by_trecho = (df_emp.groupby("TRECHO", as_index=False)["TOTAL"].mean()
+                          .rename(columns={"TOTAL":"PRECO"})
+                          .sort_values("PRECO", ascending=False).head(20))
+    barras_com_tendencia(by_trecho, "TRECHO", "PRECO", "N",
                          "Preço Top 20 trechos", y_max=3000)
 
-    # 4) Tabela Top 3
-    top3_tabela(df_emp)
+    # 4) Tabela Top 3 (usa o mesmo critério do toggle)
+    top3_tabela(df_emp, agg="min" if menor_preco else "mean")
 
     # 5) (final) SHARE CIAS
     chart_cia_stack_trecho(df_emp)
@@ -406,7 +420,7 @@ def render_empresa(df_emp: pd.DataFrame, nome: str):
 # Abas
 # ==========================
 abas = st.tabs(["FLIPMILHAS","CAPO VIAGENS","MAXMILHAS","123MILHAS"])
-with abas[0]: render_empresa(view_all[view_all["EMPRESA"] == "FLIPMILHAS"].copy(), "FLIPMILHAS")
-with abas[1]: render_empresa(view_all[view_all["EMPRESA"] == "CAPO VIAGENS"].copy(), "CAPO VIAGENS")
-with abas[2]: render_empresa(view_all[view_all["EMPRESA"] == "MAXMILHAS"].copy(), "MAXMILHAS")
-with abas[3]: render_empresa(view_all[view_all["EMPRESA"] == "123MILHAS"].copy(), "123MILHAS")
+with abas[0]: render_empresa(view_all[view_all["EMPRESA"] == "FLIPMILHAS"].copy())
+with abas[1]: render_empresa(view_all[view_all["EMPRESA"] == "CAPO VIAGENS"].copy())
+with abas[2]: render_empresa(view_all[view_all["EMPRESA"] == "MAXMILHAS"].copy())
+with abas[3]: render_empresa(view_all[view_all["EMPRESA"] == "123MILHAS"].copy())
