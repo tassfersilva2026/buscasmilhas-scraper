@@ -1,0 +1,55 @@
+name: scrape-capoviagens
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"   # roda a cada 30 min
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      TZ: America/Sao_Paulo
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Chrome + Chromedriver (variáveis CHROME_PATH / CHROMEDRIVER_PATH ficam disponíveis)
+      - name: Setup Chrome
+        uses: browser-actions/setup-chrome@v2
+        with:
+          install-chromedriver: true
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # Rode 1 ciclo e salve na pasta data (pode trocar --file se quiser outro nome)
+      - name: Run scraper (headless, single cycle)
+        run: |
+          python capoviagens_scraper_gha.py --headless --once --saida data --file CAPOVIAGENS.xlsx
+
+      - name: Commit & Push results (if changed)
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          CHANGES="$(git status --porcelain data || true)"
+          if [ -n "$CHANGES" ]; then
+            git add data
+            git commit -m "capoviagens: update $(date +'%Y-%m-%d %H:%M:%S %Z')"
+            git push
+          else
+            echo "Sem alterações em /data"
+          fi
