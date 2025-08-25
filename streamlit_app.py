@@ -170,7 +170,6 @@ def dynamic_limit(series: pd.Series, hard_cap: Optional[int]) -> int:
     y    = _nice_ceil(vmax + pad, step=50)
     if hard_cap is not None:
         y = min(y, int(hard_cap))
-    # garante mínimo razoável
     return max(y, 100)
 
 # ======================================================
@@ -262,12 +261,15 @@ def barras_com_tendencia(df: pd.DataFrame, x_col: str, y_col: str, x_type: str,
     st.altair_chart(ch, use_container_width=True)
 
 # ==========================
-# SHARE CIAS (rótulos centralizados)
+# SHARE CIAS (stack normalizado + rótulos centralizados)
 # ==========================
 def chart_cia_stack_trecho(df_emp: pd.DataFrame):
+    """Barras empilhadas normalizadas (0–100%) com rótulos centralizados por CIA."""
     if df_emp.empty:
-        st.info("Sem dados para os filtros atuais."); return
+        st.info("Sem dados para os filtros atuais.")
+        return
 
+    # Normaliza nomes das cias
     cia_raw = df_emp["CIA DO VOO"].astype(str).str.upper()
     df = df_emp.copy()
     df["CIA3"] = np.select(
@@ -276,45 +278,57 @@ def chart_cia_stack_trecho(df_emp: pd.DataFrame):
         default="OUTRAS",
     )
     df = df[df["CIA3"].isin(["AZUL", "GOL", "LATAM"])]
+    if df.empty:
+        st.info("Sem AZUL/GOL/LATAM para este filtro.")
+        return
 
-    grp = df.groupby(["TRECHO", "CIA3"], as_index=False).size().rename(columns={"size": "COUNT"})
-    tot = grp.groupby("TRECHO", as_index=False)["COUNT"].sum().rename(columns={"COUNT": "TOT"})
-    d = grp.merge(tot, on="TRECHO", how="left")
-    d["PERC"] = d["COUNT"] / d["TOT"]
+    base = alt.Chart(df)
 
-    ordem = pd.Categorical(d["CIA3"], categories=["AZUL", "GOL", "LATAM"], ordered=True)
-    d = d.assign(CIA3=ordem).sort_values(["TRECHO", "CIA3"])
-    d["Y0"] = d.groupby("TRECHO")["PERC"].cumsum() - d["PERC"]
-    d["Y1"] = d.groupby("TRECHO")["PERC"].cumsum()
-    d["YCENTER"] = (d["Y0"] + d["Y1"]) / 2.0
-    d["PERC_TXT"] = (d["PERC"] * 100).round(0).astype(int).astype(str) + "%"
-
+    # Barras empilhadas (share por trecho) — robusto com stack normalize
     bars = (
-        alt.Chart(d)
-        .mark_bar()
+        base.mark_bar()
         .encode(
             x=x_axis("TRECHO:N"),
-            y=alt.Y("Y0:Q", axis=alt.Axis(format=".0%", title=""), scale=alt.Scale(domain=[0, 1.2])),
-            y2="Y1:Q",
-            color=alt.Color("CIA3:N",
-                            scale=alt.Scale(domain=["AZUL","GOL","LATAM"], range=[AZUL_COLOR,GOL_COLOR,LATAM_COLOR]),
-                            legend=alt.Legend(title="CIA")),
-            tooltip=[alt.Tooltip("TRECHO:N"), alt.Tooltip("CIA3:N"),
-                     alt.Tooltip("PERC:Q", format=".0%"), alt.Tooltip("COUNT:Q")],
+            y=alt.Y(
+                "count():Q",
+                stack="normalize",
+                axis=alt.Axis(format=".0%", title=""),
+                scale=alt.Scale(domain=[0, 1.2]),  # 120% para respiro
+            ),
+            color=alt.Color(
+                "CIA3:N",
+                scale=alt.Scale(
+                    domain=["AZUL", "GOL", "LATAM"],
+                    range=[AZUL_COLOR, GOL_COLOR, LATAM_COLOR],
+                ),
+                legend=alt.Legend(title="CIA"),
+            ),
         )
     )
 
-    labels = (
-        alt.Chart(d)
-        .mark_text(baseline="middle", align="center", color="#fff", fontWeight="bold", size=18)
-        .encode(x=x_axis("TRECHO:N"),
-                y=alt.Y("YCENTER:Q", scale=alt.Scale(domain=[0, 1.2])),
-                text="PERC_TXT:N",
-                detail="CIA3:N")
+    # Rótulos centralizados em cada segmento
+    text = (
+        base
+        .transform_aggregate(COUNT="count()", groupby=["TRECHO", "CIA3"])
+        .transform_joinaggregate(TOTAL="sum(COUNT)", groupby=["TRECHO"])
+        .transform_calculate(PERC="datum.COUNT / datum.TOTAL")
+        .transform_window(CUM="sum(PERC)", groupby=["TRECHO"])
+        .transform_calculate(
+            YCENTER="datum.CUM - datum.PERC/2",
+            LABEL="format(datum.PERC, '.0%')",
+        )
+        .mark_text(baseline="middle", align="center", size=18, fontWeight="bold")
+        .encode(
+            x=x_axis("TRECHO:N"),
+            y=alt.Y("YCENTER:Q", scale=alt.Scale(domain=[0, 1.2])),
+            text="LABEL:N",
+            color=alt.condition(alt.datum.CIA3 == "LATAM", alt.value("#FFFFFF"), alt.value("#000000")),
+            detail="CIA3:N",
+        )
     )
 
-    chart = (bars + labels).properties(title="SHARE CIAS", height=380)
-    st.altair_chart(chart, use_container_width=True)
+    ch = (bars + text).properties(title="SHARE CIAS", height=380)
+    st.altair_chart(ch, use_container_width=True)
 
 # ==========================
 # Tabela Top 3 (índice 1..N; sem coluna extra)
