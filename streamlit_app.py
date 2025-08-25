@@ -2,8 +2,7 @@
 from __future__ import annotations
 from pathlib import Path
 from typing import List, Optional
-import math
-import re
+import math, re, os, hashlib, time
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -49,21 +48,39 @@ def find_data_dir(start: Path) -> str:
     return (start.parent / "data").as_posix()
 
 DATA_DIR_DEFAULT = find_data_dir(Path(__file__).resolve())
+DATA_DIR_PATH = Path(DATA_DIR_DEFAULT)
+
+# ==========================
+# Assinatura da pasta (para invalidar cache quando algo muda)
+# ==========================
+def dir_signature(path: Path, patterns: List[str] | None = None) -> str:
+    pats = patterns or ["FLIPMILHAS_*.xlsx", "*.xlsx", "*.xls", "*.csv", "*.parquet"]
+    parts: List[str] = []
+    for pat in pats:
+        for f in path.glob(pat):
+            try:
+                stt = f.stat()
+                parts.append(f"{f.name}:{stt.st_mtime_ns}:{stt.st_size}")
+            except FileNotFoundError:
+                pass
+    return hashlib.md5("|".join(sorted(parts)).encode()).hexdigest()
 
 # ==========================
 # Leitura e normalização
 # ==========================
-@st.cache_data(show_spinner=False)
 def _list_files(data_dir: str, patterns: List[str] | None = None) -> List[Path]:
     p = Path(data_dir)
-    if not p.exists(): return []
+    if not p.exists(): 
+        return []
     pats = patterns or ["*.xlsx", "*.xls", "*.csv", "*.parquet"]
     out: List[Path] = []
-    for pat in pats: out.extend(sorted(p.glob(pat)))
+    for pat in pats:
+        out.extend(sorted(p.glob(pat)))
     return out
 
 def _to_float_series(s: pd.Series) -> pd.Series:
-    if s.dtype.kind in ("i", "u", "f"): return s.astype(float)
+    if s.dtype.kind in ("i", "u", "f"):
+        return s.astype(float)
     txt = (s.astype(str)
            .str.replace(r"[^0-9,.-]", "", regex=True)
            .str.replace(".", "", regex=False)
@@ -78,16 +95,19 @@ def detect_empresa_from_filename(name: str) -> str:
     if "123" in u and "MILHAS" in u: return "123MILHAS"
     return "N/A"
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, ttl=0)
 def _read_one(path: str, mtime: float) -> pd.DataFrame:
     p = Path(path); ext = p.suffix.lower()
     if ext in (".xlsx", ".xls"):
         df = pd.read_excel(p)
     elif ext == ".csv":
         for sep in [";", ","]:
-            try: df = pd.read_csv(p, sep=sep); break
-            except Exception: continue
-        else: df = pd.read_csv(p)
+            try:
+                df = pd.read_csv(p, sep=sep); break
+            except Exception:
+                continue
+        else:
+            df = pd.read_csv(p)
     elif ext == ".parquet":
         df = pd.read_parquet(p)
     else:
@@ -106,7 +126,8 @@ def _read_one(path: str, mtime: float) -> pd.DataFrame:
                 "DATA PARTIDA","HORA DA PARTIDA","DATA CHEGADA","HORA DA CHEGADA",
                 "TARIFA","TX DE EMBARQUE","TOTAL","CIA DO VOO"]
     for c in required:
-        if c not in df.columns: df[c] = np.nan
+        if c not in df.columns:
+            df[c] = np.nan
 
     for c in ["TARIFA","TX DE EMBARQUE","TOTAL"]:
         df[c] = _to_float_series(df[c])
@@ -132,15 +153,20 @@ def _read_one(path: str, mtime: float) -> pd.DataFrame:
     other = [c for c in df.columns if c not in base]
     return df[base + other]
 
-@st.cache_data(show_spinner=True)
-def load_all(data_dir: str) -> pd.DataFrame:
+@st.cache_data(show_spinner=True, ttl=0)
+def load_all(data_dir: str, _sig: str) -> pd.DataFrame:
+    """_sig é a assinatura da pasta; quando muda, o cache invalida e relê tudo."""
     files = _list_files(data_dir)
-    if not files: return pd.DataFrame()
+    if not files:
+        return pd.DataFrame()
     parts = []
     for f in files:
-        try: parts.append(_read_one(str(f), f.stat().st_mtime))
-        except Exception as e: st.warning(f"Falha ao ler {f.name}: {e}")
-    if not parts: return pd.DataFrame()
+        try:
+            parts.append(_read_one(str(f), f.stat().st_mtime))
+        except Exception as e:
+            st.warning(f"Falha ao ler {f.name}: {e}")
+    if not parts:
+        return pd.DataFrame()
     df = pd.concat(parts, ignore_index=True)
     df = df.sort_values("BUSCA_DATETIME", ascending=False, kind="stable")
     return df
@@ -149,15 +175,19 @@ def fmt_moeda0(v) -> str:
     try:
         if pd.isna(v): return "-"
         return "R$ " + f"{int(round(float(v))):,}".replace(",", ".")
-    except Exception: return "-"
+    except Exception:
+        return "-"
 
 def fmt_pontos(v: float) -> str:
-    try: return f"{int(round(float(v))):,}".replace(",", ".")
-    except Exception: return "-"
+    try:
+        return f"{int(round(float(v))):,}".replace(",", ".")
+    except Exception:
+        return "-"
 
 # ============== utils p/ eixo dinâmico ==============
 def _nice_ceil(value: float, step: int = 50) -> int:
-    if not np.isfinite(value) or value <= 0: return step
+    if not np.isfinite(value) or value <= 0:
+        return step
     return int(math.ceil(value / step) * step)
 
 def dynamic_limit(series: pd.Series, hard_cap: Optional[int]) -> int:
@@ -165,17 +195,47 @@ def dynamic_limit(series: pd.Series, hard_cap: Optional[int]) -> int:
     vmax = float(np.nanmax(s.values)) if len(s) else 0.0
     pad  = max(50.0, 0.10 * vmax)
     y    = _nice_ceil(vmax + pad, step=50)
-    if hard_cap is not None: y = min(y, int(hard_cap))
+    if hard_cap is not None:
+        y = min(y, int(hard_cap))
     return max(y, 100)
+
+# ======================================================
+# CONTROLES DE ATUALIZAÇÃO + LEITURA
+# ======================================================
+c_upd, _ = st.columns([1, 8])
+with c_upd:
+    if st.button("🔄 Atualizar agora", use_container_width=True):
+        st.cache_data.clear()
+        try:
+            st.rerun()
+        except Exception:
+            st.experimental_rerun()
+
+# (opcional) auto-refresh
+if st.sidebar.toggle("⏱️ Auto-atualizar a cada 60s", value=False):
+    st.caption("Auto-atualizando em 60s…")
+    time.sleep(60)
+    st.rerun()
+
+with st.spinner("Lendo planilhas da pasta data/…"):
+    _sig = dir_signature(DATA_DIR_PATH)
+    df_all = load_all(DATA_DIR_DEFAULT, _sig)
+
+if df_all.empty:
+    st.info("Nenhum arquivo lido. Verifique a pasta `data/`."); st.stop()
+
+# Info da fonte mais recente
+try:
+    latest_file = max(DATA_DIR_PATH.glob("FLIPMILHAS_*.xlsx"), key=lambda f: f.stat().st_mtime)
+except ValueError:
+    latest_file = None
+if latest_file:
+    ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(latest_file.stat().st_mtime))
+    st.caption(f"Fonte mais recente: `{latest_file.name}` • mtime: {ts}")
 
 # ======================================================
 # FILTROS NO TOPO
 # ======================================================
-with st.spinner("Lendo planilhas da pasta data/…"):
-    df_all = load_all(DATA_DIR_DEFAULT)
-if df_all.empty:
-    st.info("Nenhum arquivo lido. Verifique a pasta `data/`."); st.stop()
-
 min_d = df_all["BUSCA_DATETIME"].dropna().min()
 max_d = df_all["BUSCA_DATETIME"].dropna().max()
 
@@ -265,7 +325,6 @@ def chart_cia_stack_trecho(df_emp: pd.DataFrame):
         st.info("Sem dados para os filtros atuais.")
         return
 
-    # Normaliza nomes das cias
     cia_raw = df_emp["CIA DO VOO"].astype(str).str.upper()
     df = df_emp.copy()
     df["CIA3"] = np.select(
@@ -280,7 +339,6 @@ def chart_cia_stack_trecho(df_emp: pd.DataFrame):
 
     base = alt.Chart(df)
 
-    # Barras empilhadas normalizadas — ordem fixa AZUL → GOL → LATAM
     bars = (
         base.mark_bar()
         .encode(
@@ -289,7 +347,7 @@ def chart_cia_stack_trecho(df_emp: pd.DataFrame):
                 "count():Q",
                 stack="normalize",
                 axis=alt.Axis(format=".0%", title=""),
-                scale=alt.Scale(domain=[0, 1.2]),  # 120% para respiro
+                scale=alt.Scale(domain=[0, 1.2]),
             ),
             color=alt.Color(
                 "CIA3:N",
@@ -303,7 +361,6 @@ def chart_cia_stack_trecho(df_emp: pd.DataFrame):
         )
     )
 
-    # Rótulos usando a MESMA pilha (y0/y1) para centralizar por segmento
     text = (
         base
         .transform_aggregate(count="count()", groupby=["TRECHO", "CIA3"])
@@ -337,25 +394,29 @@ def _fmt_currency_int(v):
     try:
         if pd.isna(v): return "-"
         return "R$ " + f"{int(round(float(v))):,}".replace(",", ".")
-    except Exception: return "-"
+    except Exception: 
+        return "-"
 
 def _row_heat_css(row: pd.Series, price_cols: List[str]) -> pd.Series:
     vals = row[price_cols].astype(float).values
     styles = {c: "" for c in row.index}
-    if np.all(np.isnan(vals)): return pd.Series(styles)
+    if np.all(np.isnan(vals)): 
+        return pd.Series(styles)
     vmin = np.nanmin(vals); vmax = np.nanmax(vals); rng = max(vmax - vmin, 1e-9)
     def interp(v):
         c0=(255,247,224); c1=(242,201,76); t=(v - vmin)/rng
-        r=int(c0[0]+t*(c1[0]-c0[0])); g=int(c0[1]+t*(c1[1]-c0[1])); b=int(c0[2]+t*(c1[2]-c0[2]))
+        r=int(c0[0]+t*(c1[0]-c1[0] if False else c1[0]-c0[0])); g=int(c0[1]+t*(c1[1]-c0[1])); b=int(c0[2]+t*(c1[2]-c0[2]))
         return f"background-color: rgb({r},{g},{b});"
     for c in price_cols:
         v=row[c]
-        if not pd.isna(v): styles[c]=interp(float(v))
+        if not pd.isna(v): 
+            styles[c]=interp(float(v))
     return pd.Series(styles)
 
 def top3_tabela(df_emp: pd.DataFrame, agg: str):
     """Tabela Top 3 por trecho x ADVP usando 'min' ou 'mean' conforme toggle."""
-    if agg not in ("min", "mean"): agg = "min"
+    if agg not in ("min", "mean"): 
+        agg = "min"
 
     if agg == "min":
         base = (df_emp.groupby(["TRECHO","ADVP"], as_index=False)["TOTAL"].min()
@@ -373,7 +434,8 @@ def top3_tabela(df_emp: pd.DataFrame, agg: str):
                      "PREÇO TOP 2": vals[1] if len(vals)>1 else np.nan, "ADVP TOP 2":advs[1] if len(advs)>1 else np.nan,
                      "PREÇO TOP 3": vals[2] if len(vals)>2 else np.nan, "ADVP TOP 3":advs[2] if len(advs)>2 else np.nan})
     if not rows:
-        st.info("Sem dados para montar o Top 3 por trecho."); return
+        st.info("Sem dados para montar o Top 3 por trecho."); 
+        return
 
     df_tbl = pd.DataFrame(rows).sort_values("TRECHO").reset_index(drop=True)
     df_tbl.index = pd.RangeIndex(start=1, stop=len(df_tbl)+1, step=1)
@@ -399,7 +461,8 @@ def render_empresa(df_emp: pd.DataFrame, key_suffix: str):
     )
 
     if df_emp.empty:
-        st.info("Sem dados para os filtros atuais."); return
+        st.info("Sem dados para os filtros atuais."); 
+        return
 
     hard_cap = 1500 if menor_preco else 3000
 
@@ -459,4 +522,3 @@ with abas[0]: render_empresa(view_all[view_all["EMPRESA"] == "FLIPMILHAS"].copy(
 with abas[1]: render_empresa(view_all[view_all["EMPRESA"] == "CAPO VIAGENS"].copy(), "CAPO")
 with abas[2]: render_empresa(view_all[view_all["EMPRESA"] == "MAXMILHAS"].copy(), "MAX")
 with abas[3]: render_empresa(view_all[view_all["EMPRESA"] == "123MILHAS"].copy(), "123")
-
