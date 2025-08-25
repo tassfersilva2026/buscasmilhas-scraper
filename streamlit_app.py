@@ -8,6 +8,9 @@ import pandas as pd
 import streamlit as st
 import altair as alt
 
+# ==========================
+# Configuração base do app
+# ==========================
 st.set_page_config(page_title="Painel de Concorrência — Flip/Capo/Max/123", layout="wide")
 
 AMARELO     = "#F2C94C"
@@ -30,7 +33,9 @@ st.markdown(
 )
 st.markdown("<h4>Painel de Concorrência — Flip/Capo/Max/123</h4>", unsafe_allow_html=True)
 
-# ---------- leitura ----------
+# ==========================
+# Localização da pasta data/
+# ==========================
 def find_data_dir(start: Path) -> str:
     cur: Optional[Path] = start
     for _ in range(8):
@@ -44,6 +49,9 @@ def find_data_dir(start: Path) -> str:
 
 DATA_DIR_DEFAULT = find_data_dir(Path(__file__).resolve())
 
+# ==========================
+# Leitura e normalização
+# ==========================
 @st.cache_data(show_spinner=False)
 def _list_files(data_dir: str, patterns: List[str] | None = None) -> List[Path]:
     p = Path(data_dir)
@@ -146,7 +154,9 @@ def fmt_pontos(v: float) -> str:
     try: return f"{int(round(float(v))):,}".replace(",", ".")
     except Exception: return "-"
 
-# ---------- filtros ----------
+# ======================================================
+# FILTROS NO TOPO
+# ======================================================
 with st.spinner("Lendo planilhas da pasta data/…"):
     df_all = load_all(DATA_DIR_DEFAULT)
 if df_all.empty:
@@ -187,7 +197,9 @@ st.caption(
 )
 st.markdown("---")
 
-# ---------- helpers de gráfico ----------
+# ======================================================
+# Helpers de gráfico
+# ======================================================
 def x_axis(enc: str, title: Optional[str]=None):
     return alt.X(enc, axis=alt.Axis(title=title, labelAngle=0, labelOverlap=True,
                                     labelFontWeight="bold", labelColor=CINZA_TXT))
@@ -220,7 +232,7 @@ def barras_com_tendencia(df: pd.DataFrame, x_col: str, y_col: str, x_type: str,
         fontWeight="bold", size=18,
     )
 
-    # Linha de tendência pontilhada (conectando os valores)
+    # Linha de tendência pontilhada
     line = (
         alt.Chart(df)
         .mark_line(color=CINZA_TXT, opacity=0.95, strokeDash=[6,4])
@@ -231,66 +243,75 @@ def barras_com_tendencia(df: pd.DataFrame, x_col: str, y_col: str, x_type: str,
     ch = (bars + labels + line).properties(title=titulo, height=340)
     st.altair_chart(ch, use_container_width=True)
 
+# ==========================
+# SHARE CIAS (igual ao exemplo, rótulos centralizados)
+# ==========================
 def chart_cia_stack_trecho(df_emp: pd.DataFrame):
-    """Share Cias com rótulos DENTRO de cada segmento e eixo até 120%."""
-    cia = df_emp["CIA DO VOO"].astype(str).str.upper()
-    df_emp = df_emp.copy()
-    df_emp["CIA3"] = np.select(
-        [cia.str.contains("GOL"), cia.str.contains("AZUL"), cia.str.contains("LATAM")],
-        ["GOL", "AZUL", "LATAM"], default="OUTRAS",
-    )
-    df_emp = df_emp[df_emp["CIA3"].isin(["GOL","AZUL","LATAM"])]
     if df_emp.empty:
-        st.info("Sem dados de GOL/AZUL/LATAM para os filtros atuais."); return
+        st.info("Sem dados para os filtros atuais."); return
 
-    grp = df_emp.groupby(["TRECHO","CIA3"], as_index=False).size().rename(columns={"size":"COUNT"})
-    tot = grp.groupby("TRECHO", as_index=False)["COUNT"].sum().rename(columns={"COUNT":"TOT"})
-    dfp = grp.merge(tot, on="TRECHO", how="left")
-    dfp["PERC"] = dfp["COUNT"] / dfp["TOT"]
-
-    # Calcula posição do centro de cada segmento (em escala normalizada 0..1)
-    order_map = {"GOL":0, "AZUL":1, "LATAM":2}
-    dfp["ORD"] = dfp["CIA3"].map(order_map)
-    dfp = dfp.sort_values(["TRECHO","ORD"])
-    dfp["CSUM"] = dfp.groupby("TRECHO")["PERC"].cumsum()
-    dfp["Y1"] = dfp["CSUM"]
-    dfp["Y0"] = dfp["CSUM"] - dfp["PERC"]
-    dfp["YCENTER"] = (dfp["Y0"] + dfp["Y1"]) / 2.0
-    dfp["PERC_TXT"] = (dfp["PERC"]*100).round(0).astype(int).astype(str) + "%"
-
-    # Barras empilhadas normalizadas com domínio 0..1.2 (120%)
-    base = alt.Chart(dfp).encode(
-        x=x_axis("TRECHO:N"),
-        y=alt.Y("COUNT:Q", stack="normalize", scale=alt.Scale(domain=[0, 1.2])),
-        color=alt.Color("CIA3:N",
-                        scale=alt.Scale(domain=["GOL","AZUL","LATAM"],
-                                        range=[GOL_COLOR, AZUL_COLOR, LATAM_COLOR]),
-                        legend=alt.Legend(title="CIA")),
-        tooltip=[alt.Tooltip("TRECHO:N"), alt.Tooltip("CIA3:N"),
-                 alt.Tooltip("PERC:Q", format=".0%"), alt.Tooltip("COUNT:Q")]
+    # Normaliza nome das cias
+    cia_raw = df_emp["CIA DO VOO"].astype(str).str.upper()
+    df = df_emp.copy()
+    df["CIA3"] = np.select(
+        [cia_raw.str.contains("AZUL"),
+         cia_raw.str.contains("GOL"),
+         cia_raw.str.contains("LATAM")],
+        ["AZUL", "GOL", "LATAM"],
+        default="OUTRAS",
     )
-    bars = base.mark_bar()
+    df = df[df["CIA3"].isin(["AZUL", "GOL", "LATAM"])]
 
-    # Rótulos por CIA usando a coordenada do centro do segmento
-    label_base = alt.Chart(dfp).encode(
-        x=x_axis("TRECHO:N"),
-        y=alt.Y("YCENTER:Q", scale=alt.Scale(domain=[0, 1.2])),
-        text="PERC_TXT:N"
-    )
-    labels_gol = label_base.transform_filter(alt.datum.CIA3 == "GOL").mark_text(
-        baseline="middle", align="center", color="#000", fontWeight="bold", size=18
-    )
-    labels_azul = label_base.transform_filter(alt.datum.CIA3 == "AZUL").mark_text(
-        baseline="middle", align="center", color="#000", fontWeight="bold", size=18
-    )
-    labels_latam = label_base.transform_filter(alt.datum.CIA3 == "LATAM").mark_text(
-        baseline="middle", align="center", color="#fff", fontWeight="bold", size=18
+    # Shares por trecho
+    grp = df.groupby(["TRECHO", "CIA3"], as_index=False).size().rename(columns={"size": "COUNT"})
+    tot = grp.groupby("TRECHO", as_index=False)["COUNT"].sum().rename(columns={"COUNT": "TOT"})
+    d = grp.merge(tot, on="TRECHO", how="left")
+    d["PERC"] = d["COUNT"] / d["TOT"]
+
+    # Ordem e coordenadas do segmento
+    ordem = pd.Categorical(d["CIA3"], categories=["AZUL", "GOL", "LATAM"], ordered=True)
+    d = d.assign(CIA3=ordem).sort_values(["TRECHO", "CIA3"])
+    d["Y0"] = d.groupby("TRECHO")["PERC"].cumsum() - d["PERC"]   # base
+    d["Y1"] = d.groupby("TRECHO")["PERC"].cumsum()               # topo
+    d["YCENTER"] = (d["Y0"] + d["Y1"]) / 2.0                     # centro p/ rótulo
+    d["PERC_TXT"] = (d["PERC"] * 100).round(0).astype(int).astype(str) + "%"
+
+    # Barras empilhadas com eixo até 120%
+    bars = (
+        alt.Chart(d)
+        .mark_bar()
+        .encode(
+            x=x_axis("TRECHO:N"),
+            y=alt.Y("Y0:Q", axis=alt.Axis(format=".0%", title=""), scale=alt.Scale(domain=[0, 1.2])),
+            y2="Y1:Q",
+            color=alt.Color(
+                "CIA3:N",
+                scale=alt.Scale(domain=["AZUL", "GOL", "LATAM"], range=[AZUL_COLOR, GOL_COLOR, LATAM_COLOR]),
+                legend=alt.Legend(title="CIA"),
+            ),
+            tooltip=[alt.Tooltip("TRECHO:N"), alt.Tooltip("CIA3:N"),
+                     alt.Tooltip("PERC:Q", format=".0%"), alt.Tooltip("COUNT:Q")],
+        )
     )
 
-    ch = (bars + labels_gol + labels_azul + labels_latam).properties(title="Share Cias", height=380)
-    st.altair_chart(ch, use_container_width=True)
+    # Rótulos centralizados DENTRO do segmento (brancos – como no print)
+    labels = (
+        alt.Chart(d)
+        .mark_text(baseline="middle", align="center", color="#fff", fontWeight="bold", size=18)
+        .encode(
+            x=x_axis("TRECHO:N"),
+            y=alt.Y("YCENTER:Q", scale=alt.Scale(domain=[0, 1.2])),
+            text="PERC_TXT:N",
+            detail="CIA3:N",
+        )
+    )
 
-# ---------- Tabela Top 3 (índice 1..N; sem cabeçalho do índice) ----------
+    chart = (bars + labels).properties(title="SHARE CIAS", height=380)
+    st.altair_chart(chart, use_container_width=True)
+
+# ==========================
+# Tabela Top 3 (índice 1..N; sem coluna extra)
+# ==========================
 def _fmt_currency_int(v):
     try:
         if pd.isna(v): return "-"
@@ -326,9 +347,8 @@ def top3_tabela(df_emp: pd.DataFrame):
         st.info("Sem dados para montar o Top 3 por trecho."); return
 
     df_tbl = pd.DataFrame(rows).sort_values("TRECHO").reset_index(drop=True)
-    # índice 1..N (ajusta a coluna existente de 0.. para 1..; sem nome para não aparecer cabeçalho)
-    df_tbl.index = pd.RangeIndex(start=1, stop=len(df_tbl)+1, step=1)
-    df_tbl.index.name = None
+    df_tbl.index = pd.RangeIndex(start=1, stop=len(df_tbl)+1, step=1)  # 1..N
+    df_tbl.index.name = None  # sem cabeçalho no índice
 
     price_cols = ["PREÇO TOP 1","PREÇO TOP 2","PREÇO TOP 3"]
     fmt_map = {c:_fmt_currency_int for c in price_cols}
@@ -338,7 +358,9 @@ def top3_tabela(df_emp: pd.DataFrame):
     st.subheader("Menor preço por Trecho × ADVP — Top 3 por trecho")
     st.write(sty)
 
-# ---------- render ----------
+# ==========================
+# Render por empresa
+# ==========================
 def render_empresa(df_emp: pd.DataFrame, nome: str):
     st.subheader(nome)
     if df_emp.empty:
@@ -374,13 +396,15 @@ def render_empresa(df_emp: pd.DataFrame, nome: str):
     barras_com_tendencia(by_trecho, "TRECHO", "PRECO_MEDIO", "N",
                          "Preço Top 20 trechos", y_max=3000)
 
-    # 4) Tabela
+    # 4) Tabela Top 3
     top3_tabela(df_emp)
 
-    # 5) (final) Share Cias
+    # 5) (final) SHARE CIAS
     chart_cia_stack_trecho(df_emp)
 
-# ---------- abas ----------
+# ==========================
+# Abas
+# ==========================
 abas = st.tabs(["FLIPMILHAS","CAPO VIAGENS","MAXMILHAS","123MILHAS"])
 with abas[0]: render_empresa(view_all[view_all["EMPRESA"] == "FLIPMILHAS"].copy(), "FLIPMILHAS")
 with abas[1]: render_empresa(view_all[view_all["EMPRESA"] == "CAPO VIAGENS"].copy(), "CAPO VIAGENS")
