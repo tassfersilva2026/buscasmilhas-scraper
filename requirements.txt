@@ -5,3 +5,4 @@ openpyxl
 xlsxwriter
 selenium>=4.24.0
 openpyxl>=3.1.2
+pytz
