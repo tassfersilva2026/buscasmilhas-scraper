@@ -2,6 +2,7 @@
 from __future__ import annotations
 from pathlib import Path
 from typing import List, Optional
+import math
 import re
 import numpy as np
 import pandas as pd
@@ -153,6 +154,24 @@ def fmt_moeda0(v) -> str:
 def fmt_pontos(v: float) -> str:
     try: return f"{int(round(float(v))):,}".replace(",", ".")
     except Exception: return "-"
+
+# ============== utils p/ eixo dinâmico ==============
+def _nice_ceil(value: float, step: int = 50) -> int:
+    """Arredonda para cima no múltiplo 'step'."""
+    if not np.isfinite(value) or value <= 0:
+        return step
+    return int(math.ceil(value / step) * step)
+
+def dynamic_limit(series: pd.Series, hard_cap: Optional[int]) -> int:
+    """Máximo dinâmico com 10% de folga, arredondado, e limitado pelo cap do toggle."""
+    s = pd.to_numeric(series, errors="coerce")
+    vmax = float(np.nanmax(s.values)) if len(s) else 0.0
+    pad  = max(50.0, 0.10 * vmax)   # 10% ou 50
+    y    = _nice_ceil(vmax + pad, step=50)
+    if hard_cap is not None:
+        y = min(y, int(hard_cap))
+    # garante mínimo razoável
+    return max(y, 100)
 
 # ======================================================
 # FILTROS NO TOPO
@@ -355,10 +374,10 @@ def top3_tabela(df_emp: pd.DataFrame, agg: str):
     st.write(sty)
 
 # ==========================
-# Render por empresa (com key único)
+# Render por empresa (key único + eixos dinâmicos)
 # ==========================
 def render_empresa(df_emp: pd.DataFrame, key_suffix: str):
-    # Toggle com key único por aba para evitar IDs duplicados
+    # Toggle com key único por aba
     menor_preco = st.toggle(
         "Menor preço",
         value=True,
@@ -368,6 +387,9 @@ def render_empresa(df_emp: pd.DataFrame, key_suffix: str):
 
     if df_emp.empty:
         st.info("Sem dados para os filtros atuais."); return
+
+    # Caps do eixo conforme toggle
+    hard_cap = 1500 if menor_preco else 3000
 
     # KPIs
     k1, k2 = st.columns(2)
@@ -383,27 +405,32 @@ def render_empresa(df_emp: pd.DataFrame, key_suffix: str):
     else:
         by_hora = df_emp.groupby("HORA_HH", as_index=False)["TOTAL"].mean().rename(columns={"TOTAL":"PRECO"})
     by_hora = horas.merge(by_hora, on="HORA_HH", how="left").fillna({"PRECO":0})
+    y_max_hora = dynamic_limit(by_hora["PRECO"], hard_cap)
     barras_com_tendencia(by_hora, "HORA_HH", "PRECO", "O",
                          "Preço por hora", x_title="HORA",
-                         y_max=3000, sort=list(range(24)))
+                         y_max=y_max_hora, sort=list(range(24)))
 
     # 2) Preço por ADVP
     if menor_preco:
         by_advp = df_emp.groupby("ADVP", as_index=False)["TOTAL"].min().rename(columns={"TOTAL":"PRECO"}).sort_values("ADVP")
     else:
         by_advp = df_emp.groupby("ADVP", as_index=False)["TOTAL"].mean().rename(columns={"TOTAL":"PRECO"}).sort_values("ADVP")
+    y_max_advp = dynamic_limit(by_advp["PRECO"], hard_cap)
     barras_com_tendencia(by_advp, "ADVP", "PRECO", "O",
-                         "Preço por ADVP", y_max=3000)
+                         "Preço por ADVP", y_max=y_max_advp)
 
     # 3) Preço Top 20 trechos
     if menor_preco:
         by_trecho = (df_emp.groupby("TRECHO", as_index=False)["TOTAL"].min()
-                     .rename(columns={"TOTAL":"PRECO"}).sort_values("PRECO", ascending=False).head(20))
+                          .rename(columns={"TOTAL":"PRECO"})
+                          .sort_values("PRECO", ascending=False).head(20))
     else:
         by_trecho = (df_emp.groupby("TRECHO", as_index=False)["TOTAL"].mean()
-                     .rename(columns={"TOTAL":"PRECO"}).sort_values("PRECO", ascending=False).head(20))
+                          .rename(columns={"TOTAL":"PRECO"})
+                          .sort_values("PRECO", ascending=False).head(20))
+    y_max_trecho = dynamic_limit(by_trecho["PRECO"], hard_cap)
     barras_com_tendencia(by_trecho, "TRECHO", "PRECO", "N",
-                         "Preço Top 20 trechos", y_max=3000)
+                         "Preço Top 20 trechos", y_max=y_max_trecho)
 
     # 4) Tabela Top 3 (segue o toggle)
     top3_tabela(df_emp, agg="min" if menor_preco else "mean")
