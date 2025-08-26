@@ -1,9 +1,9 @@
 name: scrape-capoviagens
 
 on:
+  workflow_dispatch:
   schedule:
     - cron: "*/30 * * * *"
-  workflow_dispatch:
 
 jobs:
   run:
@@ -12,20 +12,26 @@ jobs:
       contents: write
     env:
       TZ: America/Sao_Paulo
+      HEADLESS: "1"   # seu script detecta, mas deixo explícito
+    concurrency:
+      group: scrape-capo-commit
+      cancel-in-progress: false
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0          # necessário p/ rebase
-          persist-credentials: true
+          fetch-depth: 0
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: "pip"
 
+      # Chrome + Chromedriver compatíveis (1 passo)
       - name: Setup Chrome
+        id: chrome
         uses: browser-actions/setup-chrome@v2
         with:
           install-chromedriver: true
@@ -33,41 +39,35 @@ jobs:
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install selenium pandas openpyxl
 
-      - name: Run scraper (gera arquivo com timestamp)
-        run: |
-          FILE="CAPOVIAGENS_$(date +%Y%m%d_%H%M%S).xlsx"
-          echo "Gerando: $FILE"
-          python capoviagens_scraper_gha.py --headless --once --saida data --file "$FILE"
+      - name: Ensure data folder
+        run: mkdir -p data
 
-      - name: Commit & Push (com pull --rebase e retry)
+      - name: Set FILE env
+        run: echo "FILE=CAPOVIAGENS_$(date +'%Y%m%d_%H%M%S').xlsx" >> $GITHUB_ENV
+
+      - name: Run scraper (headless)
         env:
-          BRANCH_NAME: ${{ github.ref_name }}
+          CHROME_PATH: ${{ steps.chrome.outputs.chrome-path }}
+          CHROMEDRIVER_PATH: ${{ steps.chrome.outputs.chromedriver-path }}
         run: |
-          set -e
+          python capoviagens_scraper_gha.py
+          ls -lh data || true
+
+      # Opcional: guarda o arquivo também como artifact do run
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.FILE }}
+          path: data/${{ env.FILE }}
+          if-no-files-found: warn
+
+      - name: Commit results
+        run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git config pull.rebase true
-
-          # só prossegue se houve mudanças em /data
-          if [ -z "$(git status --porcelain data)" ]; then
-            echo "Sem alterações em /data"
-            exit 0
-          fi
-
-          git add data
-          git commit -m "capoviagens: $(date +'%Y-%m-%d %H:%M:%S %Z')"
-
-          # puxa alterações remotas e rebaseia, evitando o 'fetch first'
-          # tenta até 3 vezes para contornar corrida com outro job
-          for i in 1 2 3; do
-            echo "Tentativa de push #$i…"
-            git pull --rebase --autostash origin "$BRANCH_NAME" || true
-            if git push origin "$BRANCH_NAME"; then
-              echo "Push OK"
-              break
-            fi
-            echo "Push falhou, repetindo em 3s…"
-            sleep 3
-          done
+          git add data/*.xlsx || true
+          git commit -m "CAPO: add $FILE" || echo "Nada pra commitar"
+          git pull --rebase
+          git push
