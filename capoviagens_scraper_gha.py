@@ -1,7 +1,8 @@
 # capoviagens_scraper_gha.py
+# - Roda buscas para ADVPS = [30, 60, 90] (padrão) — sobrescreva com env: ADVPS="30,45,90"
 # - Salva em ./data/<FILE ou CAPOVIAGENS_YYYYMMDD_HHMMSS.xlsx>
 # - Converte horas p/ HH:MM:SS e valores p/ 2 casas decimais
-# - Headless automático no GitHub Actions (ou --headless)
+# - Headless automático no GitHub Actions (ou --HEADLESS=1)
 
 import os
 import re
@@ -101,9 +102,19 @@ def make_driver(headless: bool = False):
 # =========================
 # Main
 # =========================
+def parse_advp_list(env_value: str | None):
+    if not env_value:
+        return [30, 60, 90]
+    vals = []
+    for tok in env_value.split(","):
+        tok = tok.strip()
+        if tok.isdigit():
+            v = int(tok)
+            if v > 0:
+                vals.append(v)
+    return vals or [30, 60, 90]
+
 def main():
-    # --------- parâmetros básicos ----------
-    dias_offset = int(os.getenv("DIAS_OFFSET", "30"))
     tz = ZoneInfo("America/Sao_Paulo")
     ROOT = Path(__file__).resolve().parent
     out_dir = ROOT / "data"
@@ -117,15 +128,12 @@ def main():
     # headless automático no CI; local fica visível
     headless = os.getenv("GITHUB_ACTIONS", "") != "" or os.getenv("HEADLESS", "") == "1"
 
+    # ADVPs
+    ADVPS = parse_advp_list(os.getenv("ADVPS"))   # default [30,60,90]
+
     trechos = [
-        "CGH-SDU", "SDU-CGH", "GRU-REC", "REC-GRU",
-        "BSB-CGH", "POA-CGH", "POA-GIG", "SSA-CGH",
-        "CGH-SSA", "CGH-BSB", "CGH-POA", "REC-GIG",
-        "GRU-FOR", "REC-CGH", "GIG-REC", "GIG-POA",
-        "CGH-REC", "CWB-GIG", "GIG-CWB", "FOR-GRU",
-        "BEL-GRU", "GIG-FOR", "GRU-SSA",
+        "CGH-SDU", "SDU-CGH",
     ]
-    data_voo = (datetime.now(tz) + timedelta(days=dias_offset)).strftime("%d-%m-%Y")
 
     driver = make_driver(headless=headless)
     if not headless:
@@ -137,110 +145,117 @@ def main():
     try:
         for trecho in trechos:
             origem, destino = trecho.split("-")
-            search_id = int(time.time() * 1000)
-            url = (
-                f"https://123milhas.com/v2/busca?"
-                f"de={origem}&para={destino}&adultos=1&criancas=0&bebes=0&"
-                f"ida={data_voo}&classe=3&is_loyalty=0&search_id={search_id}"
-            )
-            driver.get(url)
 
-            # Esperas principais
-            for attempt in range(3):
+            for advp in ADVPS:
+                data_voo_date = (datetime.now(tz) + timedelta(days=advp)).date()
+                data_voo_str  = data_voo_date.strftime("%d-%m-%Y")
+                search_id = int(time.time() * 1000)
+
+                url = (
+                    f"https://123milhas.com/v2/busca?"
+                    f"de={origem}&para={destino}&adultos=1&criancas=0&bebes=0&"
+                    f"ida={data_voo_str}&classe=3&is_loyalty=0&search_id={search_id}"
+                )
+                driver.get(url)
+
+                # Esperas principais
+                for attempt in range(3):
+                    try:
+                        WebDriverWait(driver, 30).until(
+                            EC.presence_of_element_located((By.XPATH,
+                                "//div[starts-with(@id,'outbound-section-0-') and .//label]"
+                            ))
+                        )
+                        WebDriverWait(driver, 30).until(
+                            EC.presence_of_element_located((By.XPATH,
+                                "//div[starts-with(@id,'price-section-0-')]"
+                            ))
+                        )
+                        close_popup_if_present(driver)
+                        accept_cookies_if_present(driver)
+                        break
+                    except TimeoutException:
+                        close_popup_if_present(driver)
+                        time.sleep(5)
+
+                # ----- inicializa variáveis -----
+                cia = primeiro_horario = segundo_horario = adulto = None
+                valor_taxas = desconto_pix = total_pix = numero_voo = tarifa_text = None
+
+                # ----- bloco de dados do voo -----
                 try:
-                    WebDriverWait(driver, 30).until(
-                        EC.presence_of_element_located((By.XPATH,
-                            "//div[starts-with(@id,'outbound-section-0-') and .//label]"
-                        ))
-                    )
-                    WebDriverWait(driver, 30).until(
-                        EC.presence_of_element_located((By.XPATH,
-                            "//div[starts-with(@id,'price-section-0-')]"
-                        ))
-                    )
-                    close_popup_if_present(driver)
-                    accept_cookies_if_present(driver)
-                    break
-                except TimeoutException:
-                    close_popup_if_present(driver)
+                    bloco_out = driver.find_elements(By.XPATH,
+                        "//div[starts-with(@id,'outbound-section-0-') and .//label]"
+                    )[0]
+                    label = bloco_out.find_element(By.TAG_NAME, "label")
+                    raw_label = (label.text or "").strip()
+
+                    try:
+                        cia = label.find_element(By.XPATH, ".//div[1]/span[1]").text.strip()
+                    except Exception:
+                        cia = None
+                    try:
+                        numero_voo = label.find_element(By.XPATH, ".//div[1]/span[2]").text.strip()
+                    except Exception:
+                        numero_voo = None
+                    if not numero_voo:
+                        m = re.search(r"(\d{3,6})", raw_label)
+                        numero_voo = m.group(1) if m else None
+
+                    spans = label.find_elements(By.XPATH, ".//div[2]/div/span")
+                    primeiro_horario = spans[0].text.strip() if len(spans) >= 1 else None
+                    segundo_horario  = spans[1].text.strip() if len(spans) >= 2 else None
+
+                    print(f"[{trecho} | ADVP={advp}] Cia={cia} Voo={numero_voo} H1={primeiro_horario} H2={segundo_horario}")
+                except Exception as e:
+                    print(f"Erro bloco_out ({trecho} | ADVP={advp}): {e}")
+
+                # ----- bloco de preço -----
+                try:
+                    bloco_price = driver.find_elements(By.XPATH,
+                        "//div[starts-with(@id,'price-section-0-')]"
+                    )[0]
+                    cont = bloco_price.find_element(By.XPATH, ".//div[3]")
+                    adulto       = cont.find_element(By.XPATH, ".//div[1]/span[2]").text.strip()
+                    valor_taxas  = cont.find_element(By.XPATH, ".//div[2]/span[2]").text.strip()
+                    desconto_pix = cont.find_element(By.XPATH, ".//div[3]/span[2]").text.strip()
+                    total_pix    = cont.find_element(By.XPATH, ".//div[4]/span[2]").text.strip()
+                    print(f"[{trecho} | ADVP={advp}] Adulto={adulto} Taxas={valor_taxas} DescPIX={desconto_pix} TotalPIX={total_pix}")
+                except Exception as e:
+                    print(f"Erro bloco_price ({trecho} | ADVP={advp}): {e}")
+
+                # ----- detalhe tarifa (opcional) -----
+                try:
+                    btn_info = driver.find_element(By.XPATH, "//*[contains(@id,'-button-info')]")
+                    btn_info.click()
                     time.sleep(5)
-
-            # ----- inicializa variáveis -----
-            cia = primeiro_horario = segundo_horario = adulto = None
-            valor_taxas = desconto_pix = total_pix = numero_voo = tarifa_text = None
-
-            # ----- bloco de dados do voo -----
-            try:
-                bloco_out = driver.find_elements(By.XPATH,
-                    "//div[starts-with(@id,'outbound-section-0-') and .//label]"
-                )[0]
-                label = bloco_out.find_element(By.TAG_NAME, "label")
-                raw_label = (label.text or "").strip()
-
-                try:
-                    cia = label.find_element(By.XPATH, ".//div[1]/span[1]").text.strip()
+                    tarifa_text = WebDriverWait(driver, 20).until(
+                        EC.visibility_of_element_located((By.XPATH,
+                            '//*[@id="app-layout"]/div[1]/div/div/div[2]/flight-itinerary/div[2]/span'
+                        ))
+                    ).text.strip()
                 except Exception:
-                    cia = None
-                try:
-                    numero_voo = label.find_element(By.XPATH, ".//div[1]/span[2]").text.strip()
-                except Exception:
-                    numero_voo = None
-                if not numero_voo:
-                    m = re.search(r"(\d{3,6})", raw_label)
-                    numero_voo = m.group(1) if m else None
+                    pass
 
-                spans = label.find_elements(By.XPATH, ".//div[2]/div/span")
-                primeiro_horario = spans[0].text.strip() if len(spans) >= 1 else None
-                segundo_horario  = spans[1].text.strip() if len(spans) >= 2 else None
+                resultado = {
+                    "trecho": trecho,
+                    "advp": advp,
+                    "data_voo": data_voo_date,           # data real (formatada no Excel)
+                    "timestamp_busca": datetime.now(tz).strftime("%Y-%m-%d %H:%M"),
+                    "cia": cia,
+                    "primeiro_horario": primeiro_horario,  # converte ao salvar
+                    "segundo_horario":  segundo_horario,   # converte ao salvar
+                    "adulto":           adulto,            # converte ao salvar
+                    "tarifa_texto":     tarifa_text,
+                    "valor_taxas":      valor_taxas,       # converte ao salvar
+                    "desconto_pix":     desconto_pix,      # converte ao salvar
+                    "total_pix":        total_pix,         # converte ao salvar
+                    "numero_voo":       numero_voo,
+                }
+                resultados.append(resultado)
 
-                print(f"[{trecho}] Cia={cia} Voo={numero_voo} H1={primeiro_horario} H2={segundo_horario}")
-            except Exception as e:
-                print(f"Erro bloco_out ({trecho}): {e}")
-
-            # ----- bloco de preço -----
-            try:
-                bloco_price = driver.find_elements(By.XPATH,
-                    "//div[starts-with(@id,'price-section-0-')]"
-                )[0]
-                cont = bloco_price.find_element(By.XPATH, ".//div[3]")
-                adulto       = cont.find_element(By.XPATH, ".//div[1]/span[2]").text.strip()
-                valor_taxas  = cont.find_element(By.XPATH, ".//div[2]/span[2]").text.strip()
-                desconto_pix = cont.find_element(By.XPATH, ".//div[3]/span[2]").text.strip()
-                total_pix    = cont.find_element(By.XPATH, ".//div[4]/span[2]").text.strip()
-                print(f"[{trecho}] Adulto={adulto} Taxas={valor_taxas} DescPIX={desconto_pix} TotalPIX={total_pix}")
-            except Exception as e:
-                print(f"Erro bloco_price ({trecho}): {e}")
-
-            # ----- detalhe tarifa (opcional) -----
-            try:
-                btn_info = driver.find_element(By.XPATH, "//*[contains(@id,'-button-info')]")
-                btn_info.click()
-                time.sleep(5)
-                tarifa_text = WebDriverWait(driver, 20).until(
-                    EC.visibility_of_element_located((By.XPATH,
-                        '//*[@id="app-layout"]/div[1]/div/div/div[2]/flight-itinerary/div[2]/span'
-                    ))
-                ).text.strip()
-            except Exception:
-                pass
-
-            resultado = {
-                "trecho": trecho,
-                "timestamp_busca": datetime.now(tz).strftime("%Y-%m-%d %H:%M"),
-                "cia": cia,
-                "primeiro_horario": primeiro_horario,  # converte ao salvar
-                "segundo_horario":  segundo_horario,   # converte ao salvar
-                "adulto":           adulto,            # converte ao salvar
-                "tarifa_texto":     tarifa_text,
-                "valor_taxas":      valor_taxas,       # converte ao salvar
-                "desconto_pix":     desconto_pix,      # converte ao salvar
-                "total_pix":        total_pix,         # converte ao salvar
-                "numero_voo":       numero_voo,
-            }
-            resultados.append(resultado)
-
-            # pausa curta entre buscas (evita antispam)
-            time.sleep(12)
+                # pausa curta entre buscas
+                time.sleep(10)
 
     finally:
         try: driver.quit()
@@ -260,9 +275,7 @@ def main():
 
     df = pd.DataFrame(resultados)
 
-    from openpyxl import Workbook
     from openpyxl import load_workbook
-
     with pd.ExcelWriter(caminho_arquivo, engine="openpyxl") as writer:
         sheet = "BUSCAS"
         df.to_excel(writer, index=False, sheet_name=sheet)
@@ -270,6 +283,14 @@ def main():
 
         # map col name -> index
         col_idx = {name: idx + 1 for idx, name in enumerate(df.columns)}
+
+        # Formato de data (data_voo)
+        if "data_voo" in col_idx:
+            j = col_idx["data_voo"]
+            for r in range(2, len(df) + 2):
+                cell = ws.cell(row=r, column=j)
+                if cell.value is not None:
+                    cell.number_format = "dd/mm/yyyy"
 
         # Formato de hora
         for col in ["primeiro_horario", "segundo_horario"]:
@@ -291,7 +312,8 @@ def main():
 
         # Larguras simpáticas
         widths = {
-            "trecho": 12, "timestamp_busca": 20, "cia": 16, "numero_voo": 12,
+            "trecho": 12, "advp": 8, "data_voo": 12, "timestamp_busca": 20,
+            "cia": 16, "numero_voo": 12,
             "primeiro_horario": 12, "segundo_horario": 12,
             "adulto": 14, "valor_taxas": 14, "desconto_pix": 14, "total_pix": 14
         }
