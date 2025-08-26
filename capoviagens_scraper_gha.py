@@ -63,17 +63,12 @@ def accept_cookies_if_present(driver):
         pass
 
 def main():
-    dias_offset = 30
+    dias_offset = 30,60,90
     pasta_saida = r"C:\Users\tassiana.silva\Documents\BUSCA DE VOOS"
     os.makedirs(pasta_saida, exist_ok=True)
 
     trechos = [
-        "CGH-SDU", "SDU-CGH", "GRU-REC", "REC-GRU",
-        "BSB-CGH", "POA-CGH", "POA-GIG", "SSA-CGH",
-        "CGH-SSA", "CGH-BSB", "CGH-POA", "REC-GIG",
-        "GRU-FOR", "REC-CGH", "GIG-REC", "GIG-POA",
-        "CGH-REC", "CWB-GIG", "GIG-CWB", "FOR-GRU",
-        "BEL-GRU", "GIG-FOR", "GRU-SSA",
+        "CGH-SDU", "SDU-CGH",
     ]
     data_voo = (datetime.today() + timedelta(days=dias_offset)).strftime("%d-%m-%Y")
 
@@ -251,3 +246,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
