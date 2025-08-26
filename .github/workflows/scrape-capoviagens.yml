@@ -2,7 +2,7 @@ name: scrape-capoviagens
 
 on:
   schedule:
-    - cron: "*/30 * * * *"   # roda a cada 30 min
+    - cron: "*/30 * * * *"
   workflow_dispatch:
 
 jobs:
@@ -11,7 +11,7 @@ jobs:
     permissions:
       contents: write
     env:
-      TZ: America/Sao_Paulo
+      TZ: America/Sao_Paulo   # garante o fuso para `date`
 
     steps:
       - name: Checkout
@@ -24,7 +24,6 @@ jobs:
         with:
           python-version: "3.12"
 
-      # Chrome + Chromedriver (variáveis CHROME_PATH / CHROMEDRIVER_PATH ficam disponíveis)
       - name: Setup Chrome
         uses: browser-actions/setup-chrome@v2
         with:
@@ -35,20 +34,20 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # Rode 1 ciclo e salve na pasta data (pode trocar --file se quiser outro nome)
-      - name: Run scraper (headless, single cycle)
+      - name: Run scraper (headless, single cycle, filename com timestamp)
         run: |
-          python capoviagens_scraper_gha.py --headless --once --saida data --file CAPOVIAGENS.xlsx
+          # Formato: CAPOVIAGENS_YYYYMMDD_HHMMSS.xlsx
+          FILE="CAPOVIAGENS_$(date +%Y%m%d_%H%M%S).xlsx"
+          echo "Arquivo: $FILE"
+          python capoviagens_scraper_gha.py --headless --once --saida data --file "$FILE"
 
       - name: Commit & Push results (if changed)
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          CHANGES="$(git status --porcelain data || true)"
-          if [ -n "$CHANGES" ]; then
+          if [ -n "$(git status --porcelain data)" ]; then
             git add data
-            git commit -m "capoviagens: update $(date +'%Y-%m-%d %H:%M:%S %Z')"
+            git commit -m "capoviagens: $(date +'%Y-%m-%d %H:%M:%S %Z')"
             git push
           else
             echo "Sem alterações em /data"
