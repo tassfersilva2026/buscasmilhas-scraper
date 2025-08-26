@@ -26,18 +26,9 @@ from selenium.common.exceptions import TimeoutException
 TZ = ZoneInfo("America/Sao_Paulo")
 SHEET_NAME = "BUSCAS"
 
-ADVP_LIST = [1, 3, 7, 14, 21, 30, 60, 90]
+ADVP_LIST = [60, 90]
 TRECHOS = [
-    ("CGH", "SDU"), ("SDU", "CGH"),
-    ("GRU", "POA"), ("POA", "GRU"),
-    ("CGH", "GIG"), ("GIG", "CGH"),
-    ("BSB", "CGH"), ("CGH", "BSB"),
-    ("CGH", "REC"), ("REC", "CGH"),
-    ("CGH", "SSA"), ("SSA", "CGH"),
-    ("BSB", "GIG"), ("GIG", "BSB"),
-    ("GIG", "REC"), ("REC", "GIG"),
-    ("GIG", "SSA"), ("SSA", "GIG"),
-    ("BSB", "SDU"), ("SDU", "BSB"),
+    ("CGH", "SDU"), 
 ]
 
 # ======= CAPO VIAGENS =======
@@ -364,3 +355,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
