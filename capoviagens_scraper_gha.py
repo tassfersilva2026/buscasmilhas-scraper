@@ -28,8 +28,20 @@ SHEET_NAME = "BUSCAS"
 CENTER = Alignment(horizontal="center", vertical="center")
 
 # Trechos/ADVP solicitados (os mesmos que você usa no local)
-TRECHOS = ["CNF-GRU", "REC-CGH", "POA-GRU"]
-ADVP_LIST = [30, 60]
+ADVP_LIST = [1, 3, 7, 14, 21, 30, 60, 90]
+TRECHOS = [
+    ("CGH", "SDU"), ("SDU", "CGH"),
+    ("GRU", "POA"), ("POA", "GRU"),
+    ("CGH", "GIG"), ("GIG", "CGH"),
+    ("BSB", "CGH"), ("CGH", "BSB"),
+    ("CGH", "REC"), ("REC", "CGH"),
+    ("CGH", "SSA"), ("SSA", "CGH"),
+    ("BSB", "GIG"), ("GIG", "BSB"),
+    ("GIG", "REC"), ("REC", "GIG"),
+    ("GIG", "SSA"), ("SSA", "GIG"),
+    ("BSB", "SDU"), ("SDU", "BSB"),
+]
+
 
 # URL da Capo
 def build_url(trecho: str, advp_days: int) -> tuple[str, date]:
@@ -431,3 +443,4 @@ def setup_driver(headless=True):
 
 if __name__ == "__main__":
     main()
+
