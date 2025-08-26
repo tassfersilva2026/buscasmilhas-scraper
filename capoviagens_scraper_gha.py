@@ -1,7 +1,6 @@
-# capoviagens_scraper_gha.py — versão p/ GitHub Actions (1 ciclo + headless)
+# capoviagens_scraper_gha.py — versão p/ GitHub Actions (robusta/headless)
 # Saída: output/CAPOVIAGENS.xlsx (aba "BUSCAS")
-# Execução típica (local): python capoviagens_scraper_gha.py --headless --once
-# Execução no GitHub Actions: igual ao flip, basta trocar o arquivo no job
+# Execução típica: python capoviagens_scraper_gha.py --headless --once
 
 import os, re, time, argparse, logging
 from datetime import datetime, timedelta, date, time as dtime
@@ -13,7 +12,6 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.utils import get_column_letter
 from openpyxl.styles import Alignment
 
-# ===== Selenium (robusto p/ CI) =====
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service as ChromeService
@@ -22,32 +20,22 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException
 
-# ======= CONFIG PADRÃO =======
+# ======= CONFIG =======
 TZ = ZoneInfo("America/Sao_Paulo")
 SHEET_NAME = "BUSCAS"
 
-ADVP_LIST = [1, 3, 7, 14, 21, 30, 60, 90]
+ADVP_LIST = [60, 90]
 TRECHOS = [
-    ("CGH", "SDU"), ("SDU", "CGH"),
-    ("GRU", "POA"), ("POA", "GRU"),
-    ("CGH", "GIG"), ("GIG", "CGH"),
-    ("BSB", "CGH"), ("CGH", "BSB"),
-    ("CGH", "REC"), ("REC", "CGH"),
-    ("CGH", "SSA"), ("SSA", "CGH"),
-    ("BSB", "GIG"), ("GIG", "BSB"),
-    ("GIG", "REC"), ("REC", "GIG"),
-    ("GIG", "SSA"), ("SSA", "GIG"),
-    ("BSB", "SDU"), ("SDU", "BSB"),
+    ("CGH","SDU"), ("SDU","CGH"),
+    ("GRU","POA"), ("POA","GRU"),
 ]
 
-# ======= CAPO VIAGENS =======
 def build_url(origin: str, destiny: str, departure_date: str) -> str:
-    # ida simples
     return ("https://www.capoviagens.com.br/voos/"
             f"?fromAirport={origin}&toAirport={destiny}&departureDate={departure_date}"
             "&adult=1&child=0&cabin=Basic&isTwoWays=false")
 
-# XPaths do 1º card (enviados por você)
+# === XPaths do 1º card (mantidos) ===
 XPATH_HORA_PARTIDA = '//*[@id="__next"]/div[4]/div[5]/div/main/div[2]/div/div[1]/div[1]/div[1]/div[1]/label/label/div/div/div[1]/span[1]'
 XPATH_HORA_CHEGADA = '//*[@id="__next"]/div[4]/div[5]/div/main/div[2]/div/div[1]/div[1]/div[1]/div[1]/label/label/div/div/div[3]/span[1]'
 XPATH_TARIFA       = '//*[@id="__next"]/div[4]/div[5]/div/main/div[2]/div/div[1]/div[1]/div[2]/div/div[1]/div[2]/div[1]/div/span[1]'
@@ -70,16 +58,18 @@ def brl_to_decimal(txt: str):
     except (InvalidOperation, TypeError): return None
 
 def parse_time_hhmm(txt: str, fallback_date: date | None) -> datetime | None:
-    # Converte "HH:MM" (ou "HH:MM:SS") para datetime no fuso TZ usando fallback_date
+    """
+    Aceita 03:15 | 03:15:00 | 03h15 | 03:15h
+    """
     if not txt or not fallback_date: return None
-    txt = txt.strip()
-    m = re.fullmatch(r"(\d{2}):(\d{2})(?::(\d{2}))?", txt)
+    t = txt.strip().lower().replace(" ", "")
+    m = re.fullmatch(r"(?:(\d{1,2})[:h](\d{2})(?::(\d{2}))?)h?", t)
     if not m: return None
     hh, mm, ss = m.groups()
-    ss = ss or "00"
+    hh = int(hh); mm = int(mm); ss = int(ss or 0)
     try:
         return datetime(fallback_date.year, fallback_date.month, fallback_date.day,
-                        int(hh), int(mm), int(ss), tzinfo=TZ)
+                        hh, mm, ss, tzinfo=TZ)
     except ValueError:
         return None
 
@@ -94,6 +84,7 @@ def to_excel_naive(value):
     if isinstance(value, datetime):
         return value.replace(tzinfo=None)
     if isinstance(value, dtime):
+        # time() de um datetime "aware" pode carregar tzinfo
         return value.replace(tzinfo=None)
     return value
 
@@ -120,6 +111,7 @@ def _create_new_workbook(path: str):
     for j, hdr in enumerate(HEADERS, start=1):
         ws.column_dimensions[get_column_letter(j)].width = widths.get(hdr, 16)
         ws.cell(row=1, column=j).alignment = CENTER
+    ws.freeze_panes = "A2"
     wb.save(path); wb.close()
 
 def ensure_workbook(path: str):
@@ -132,6 +124,7 @@ def ensure_workbook(path: str):
         ws.append(HEADERS)
         for j in range(1, len(HEADERS)+1):
             ws.cell(row=1, column=j).alignment = CENTER
+        ws.freeze_panes = "A2"
         wb.save(path)
     wb.close()
 
@@ -139,10 +132,6 @@ def append_row(path: str, row_values: dict):
     ensure_workbook(path)
     wb = load_workbook(path)
     ws = wb[SHEET_NAME]
-    if ws.max_row == 1 and all((c.value is None for c in ws[1])):
-        ws.append(HEADERS)
-        for j in range(1, len(HEADERS)+1):
-            ws.cell(row=1, column=j).alignment = CENTER
 
     clean = {k: to_excel_naive(v) for k, v in row_values.items()}
     row = [clean.get(h) for h in HEADERS]
@@ -150,12 +139,12 @@ def append_row(path: str, row_values: dict):
     r = ws.max_row
 
     fmt = {
-        "DATA DA BUSCA": "DD/MM/YYYY",
-        "HORA DA BUSCA": "HH:MM:SS",
-        "DATA PARTIDA": "DD/MM/YYYY",
-        "HORA DA PARTIDA": "HH:MM:SS",
-        "DATA CHEGADA": "DD/MM/YYYY",
-        "HORA DA CHEGADA": "HH:MM:SS",
+        "DATA DA BUSCA": "dd/mm/yyyy",
+        "HORA DA BUSCA": "hh:mm:ss",
+        "DATA PARTIDA": "dd/mm/yyyy",
+        "HORA DA PARTIDA": "hh:mm:ss",
+        "DATA CHEGADA": "dd/mm/yyyy",
+        "HORA DA CHEGADA": "hh:mm:ss",
         "TARIFA": "#,##0.00",
         "TX DE EMBARQUE": "#,##0.00",
         "TOTAL": "#,##0.00",
@@ -169,9 +158,8 @@ def append_row(path: str, row_values: dict):
     wb.save(path)
     wb.close()
 
-# ======= Selenium =======
+# ======= Selenium util =======
 def _maybe_set_binary_location(opts: Options):
-    """Usa CHROME_PATH do GitHub Actions se existir; caso contrário Selenium Manager resolve."""
     chrome_path = os.getenv("CHROME_PATH") or os.getenv("GOOGLE_CHROME_SHIM")
     if chrome_path and os.path.exists(chrome_path):
         opts.binary_location = chrome_path
@@ -181,11 +169,10 @@ def setup_driver(headless: bool = True):
     options = Options()
     if headless:
         options.add_argument("--headless=new")
-        options.add_argument("--window-size=1920,1080")
-        options.add_argument("--hide-scrollbars")
+    options.add_argument("--window-size=1920,1080")
+    options.add_argument("--hide-scrollbars")
     _maybe_set_binary_location(options)
 
-    # Flags estáveis no CI
     options.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
     options.add_experimental_option("useAutomationExtension", False)
     options.add_argument("--disable-blink-features=AutomationControlled")
@@ -198,14 +185,14 @@ def setup_driver(headless: bool = True):
     options.add_argument("--no-first-run")
     options.add_argument("--disable-notifications")
     options.add_argument("--lang=pt-BR")
-    options.add_argument("--use-gl=swiftshader")
+    options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36")
     options.add_argument("--enable-unsafe-swiftshader")
 
     driver_path = os.getenv("CHROMEDRIVER_PATH")
     service = ChromeService(executable_path=driver_path) if driver_path and os.path.exists(driver_path) else ChromeService()
     driver = webdriver.Chrome(service=service, options=options)
-    logging.info("Chrome binary: %s | chromedriver: %s", getattr(options, "binary_location", None), (driver_path or "selenium-manager"))
-    wait = WebDriverWait(driver, 15)
+    wait = WebDriverWait(driver, 20)
+    logging.info("Chrome: %s | chromedriver: %s", getattr(options, "binary_location", None), driver_path or "selenium-manager")
     return driver, wait
 
 def navigate_same_tab(driver, url):
@@ -214,31 +201,57 @@ def navigate_same_tab(driver, url):
     except Exception:
         driver.get(url)
 
+def js_inner_text(driver, element):
+    try:
+        return (driver.execute_script("return (arguments[0].innerText||arguments[0].textContent||'').trim();", element) or "").strip()
+    except Exception:
+        return (element.text or "").strip()
+
+def scroll_into_view(driver, element):
+    try:
+        driver.execute_script("arguments[0].scrollIntoView({behavior:'instant',block:'center'});", element)
+    except Exception:
+        pass
+
+def find_text(driver, xpath, tries=4, delay=1.5):
+    last_err = None
+    for _ in range(tries):
+        try:
+            el = WebDriverWait(driver, 10).until(EC.visibility_of_element_located((By.XPATH, xpath)))
+            scroll_into_view(driver, el)
+            txt = js_inner_text(driver, el)
+            if txt:
+                return txt
+        except Exception as e:
+            last_err = e
+        time.sleep(delay)
+    logging.debug("find_text timeout em %s (%s)", xpath, last_err)
+    return None
+
+def accept_cookies_if_any(driver):
+    try:
+        # tenta vários botões com textos comuns
+        btns = driver.find_elements(By.XPATH, "//button[contains(., 'Aceitar') or contains(., 'Concordo') or contains(., 'Prosseguir') or contains(., 'Continuar') or contains(., 'Fechar')]")
+        if btns:
+            btns[0].click()
+            time.sleep(0.5)
+    except Exception:
+        pass
+
 def wait_any_text(driver, xpaths, max_wait):
-    """Espera até algum dos XPaths ter texto (Capo 1º card)."""
     start = time.time()
     while time.time() - start < max_wait:
         for xp in xpaths:
             try:
-                el = WebDriverWait(driver, 1).until(EC.presence_of_element_located((By.XPATH, xp)))
-                if (el.text or "").strip():
+                el = WebDriverWait(driver, 3).until(EC.visibility_of_element_located((By.XPATH, xp)))
+                scroll_into_view(driver, el)
+                txt = js_inner_text(driver, el)
+                if txt:
                     return "ready"
             except TimeoutException:
                 pass
         time.sleep(1)
     return "timeout"
-
-def get_text_or_none(driver, xpath, tries=3, delay=2):
-    for _ in range(tries):
-        try:
-            el = WebDriverWait(driver, 6).until(EC.presence_of_element_located((By.XPATH, xpath)))
-            txt = (el.text or "").strip()
-            if txt:
-                return txt
-        except TimeoutException:
-            pass
-        time.sleep(delay)
-    return None
 
 # ======= 1 passo (trecho+ADVP) =======
 def processar_trecho_advp(driver, base_tab, out_path, origin, destiny, advp, espera):
@@ -250,7 +263,10 @@ def processar_trecho_advp(driver, base_tab, out_path, origin, destiny, advp, esp
     except Exception: base_tab = driver.current_window_handle
     navigate_same_tab(driver, url)
 
-    # Espera o 1º card ter conteúdo (qualquer um dos campos com texto)
+    # banner de cookies (se houver)
+    time.sleep(0.8)
+    accept_cookies_if_any(driver)
+
     status = wait_any_text(driver,
                            [XPATH_CIA, XPATH_TARIFA, XPATH_HORA_PARTIDA, XPATH_TOTAL],
                            max_wait=espera)
@@ -274,13 +290,16 @@ def processar_trecho_advp(driver, base_tab, out_path, origin, destiny, advp, esp
         append_row(out_path, row)
         return base_tab
 
-    # Extrai textos do 1º card
-    partida_txt = get_text_or_none(driver, XPATH_HORA_PARTIDA)
-    chegada_txt = get_text_or_none(driver, XPATH_HORA_CHEGADA)
-    tarifa_txt  = get_text_or_none(driver, XPATH_TARIFA)
-    taxa_txt    = get_text_or_none(driver, XPATH_TX_EMBARQUE)
-    total_txt   = get_text_or_none(driver, XPATH_TOTAL)
-    cia_txt     = get_text_or_none(driver, XPATH_CIA)
+    # Extrai textos usando a função robusta
+    partida_txt = find_text(driver, XPATH_HORA_PARTIDA)
+    chegada_txt = find_text(driver, XPATH_HORA_CHEGADA)
+    tarifa_txt  = find_text(driver, XPATH_TARIFA)
+    taxa_txt    = find_text(driver, XPATH_TX_EMBARQUE)
+    total_txt   = find_text(driver, XPATH_TOTAL)
+    cia_txt     = find_text(driver, XPATH_CIA)
+
+    logging.info("Trecho %s ADVP %d | brutos => partida=%s chegada=%s tarifa=%s taxa=%s total=%s cia=%s",
+                 trecho_str, advp, partida_txt, chegada_txt, tarifa_txt, taxa_txt, total_txt, cia_txt)
 
     partida_dt = parse_time_hhmm(partida_txt, fallback_date=data_voo) if partida_txt else None
     chegada_dt = parse_time_hhmm(chegada_txt, fallback_date=data_voo) if chegada_txt else None
@@ -290,10 +309,10 @@ def processar_trecho_advp(driver, base_tab, out_path, origin, destiny, advp, esp
     if total_val is None and (tarifa_val is not None or taxa_val is not None):
         total_val = (tarifa_val or Decimal(0)) + (taxa_val or Decimal(0))
 
-    data_partida = partida_dt.date() if partida_dt else data_voo
-    hora_partida = partida_dt.time() if partida_dt else None
-    data_chegada = chegada_dt.date() if chegada_dt else data_voo
-    hora_chegada = chegada_dt.time() if chegada_dt else None
+    data_partida = (partida_dt.date() if partida_dt else data_voo) if (partida_txt or total_val is not None) else None
+    hora_partida = partida_dt.time().replace(tzinfo=None) if partida_dt else None
+    data_chegada = (chegada_dt.date() if chegada_dt else data_voo) if (chegada_txt or total_val is not None) else None
+    hora_chegada = chegada_dt.time().replace(tzinfo=None) if chegada_dt else None
 
     cia_clean = clean_cia_text(cia_txt) if cia_txt else ("Sem Ofertas" if (tarifa_val is None and taxa_val is None and total_val is None) else "")
 
@@ -318,11 +337,11 @@ def main():
     parser = argparse.ArgumentParser(description="Capo Viagens scraper p/ GitHub Actions (1 ciclo opcional).")
     parser.add_argument("--saida",    default="output", help="Pasta para salvar Excel")
     parser.add_argument("--file",     default="CAPOVIAGENS.xlsx", help="Nome do arquivo Excel")
-    parser.add_argument("--espera",   type=int, default=20, help="Segundos máx para aparecer o 1º card")
+    parser.add_argument("--espera",   type=int, default=35, help="Segundos máx para aparecer o 1º card")
     parser.add_argument("--headless", action="store_true", help="Força headless")
     parser.add_argument("--gui",      dest="headless", action="store_false", help="Abre janela (debug local)")
     parser.add_argument("--once",     action="store_true", help="Roda apenas 1 ciclo e finaliza")
-    parser.set_defaults(headless=True)  # no GitHub: headless por padrão
+    parser.set_defaults(headless=True)
     args = parser.parse_args()
 
     os.makedirs(args.saida, exist_ok=True)
@@ -356,7 +375,6 @@ def main():
                 ciclo()
                 logging.info("Ciclo terminado. Aguardando 5 minutos…")
                 time.sleep(300)
-
     finally:
         try: driver.quit()
         except Exception: pass
