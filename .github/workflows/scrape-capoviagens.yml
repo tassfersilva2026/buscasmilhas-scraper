@@ -11,13 +11,14 @@ jobs:
     permissions:
       contents: write
     env:
-      TZ: America/Sao_Paulo   # garante o fuso para `date`
+      TZ: America/Sao_Paulo
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 0          # necessário p/ rebase
+          persist-credentials: true
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -29,26 +30,44 @@ jobs:
         with:
           install-chromedriver: true
 
-      - name: Install dependencies
+      - name: Install deps
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run scraper (headless, single cycle, filename com timestamp)
+      - name: Run scraper (gera arquivo com timestamp)
         run: |
-          # Formato: CAPOVIAGENS_YYYYMMDD_HHMMSS.xlsx
           FILE="CAPOVIAGENS_$(date +%Y%m%d_%H%M%S).xlsx"
-          echo "Arquivo: $FILE"
+          echo "Gerando: $FILE"
           python capoviagens_scraper_gha.py --headless --once --saida data --file "$FILE"
 
-      - name: Commit & Push results (if changed)
+      - name: Commit & Push (com pull --rebase e retry)
+        env:
+          BRANCH_NAME: ${{ github.ref_name }}
         run: |
+          set -e
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          if [ -n "$(git status --porcelain data)" ]; then
-            git add data
-            git commit -m "capoviagens: $(date +'%Y-%m-%d %H:%M:%S %Z')"
-            git push
-          else
+          git config pull.rebase true
+
+          # só prossegue se houve mudanças em /data
+          if [ -z "$(git status --porcelain data)" ]; then
             echo "Sem alterações em /data"
+            exit 0
           fi
+
+          git add data
+          git commit -m "capoviagens: $(date +'%Y-%m-%d %H:%M:%S %Z')"
+
+          # puxa alterações remotas e rebaseia, evitando o 'fetch first'
+          # tenta até 3 vezes para contornar corrida com outro job
+          for i in 1 2 3; do
+            echo "Tentativa de push #$i…"
+            git pull --rebase --autostash origin "$BRANCH_NAME" || true
+            if git push origin "$BRANCH_NAME"; then
+              echo "Push OK"
+              break
+            fi
+            echo "Push falhou, repetindo em 3s…"
+            sleep 3
+          done
