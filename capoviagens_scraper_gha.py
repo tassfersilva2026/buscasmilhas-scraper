@@ -167,6 +167,7 @@ def _save_xls(df: pd.DataFrame, xls_path: Path):
 
     header_style = xlwt.easyxf("font: bold on; align: horiz center; pattern: pattern solid, fore_colour ice_blue;")
     money_style  = xlwt.easyxf(num_format_str="0.00")
+    int_style    = xlwt.easyxf(num_format_str="0")
     text_style   = xlwt.easyxf("")
 
     # Largura de colunas
@@ -178,15 +179,18 @@ def _save_xls(df: pd.DataFrame, xls_path: Path):
         ws.write(0, j, col, header_style)
 
     money_cols = {"por_adulto", "taxa_embarque", "taxa_servico", "valor_total"}
+    int_cols   = {"antecedencia", "numero_voo"}
 
     # Linhas
     for i, (_, row) in enumerate(df.iterrows(), start=1):
         for j, col in enumerate(df.columns):
             val = row[col]
-            if pd.isna(val):
+            if pd.isna(val) or val == "":
                 ws.write(i, j, "", text_style)
             elif col in money_cols and isinstance(val, (int, float)):
                 ws.write(i, j, float(val), money_style)
+            elif col in int_cols and isinstance(val, (int, float)):
+                ws.write(i, j, int(val), int_style)
             else:
                 ws.write(i, j, str(val), text_style)
 
@@ -326,10 +330,16 @@ def run_once():
     ]
     if not df.empty:
         df = df.reindex(columns=cols, fill_value="")
-        for col in ["por_adulto","taxa_embarque","taxa_servico","valor_total"]:
-            df[col] = df[col].apply(_parse_money).round(2)
+        # numéricos
+        df["por_adulto"]    = df["por_adulto"].apply(_parse_money).astype(float).round(2)
+        df["taxa_embarque"] = df["taxa_embarque"].apply(_parse_money).astype(float).round(2)
+        df["taxa_servico"]  = df["taxa_servico"].apply(_parse_money).astype(float).round(2)
+        df["valor_total"]   = df["valor_total"].apply(_parse_money).astype(float).round(2)
+        df["antecedencia"]  = pd.to_numeric(df["antecedencia"], errors="coerce").astype("Int64")
+        # numero_voo: extrai dígitos e converte
+        num = df["numero_voo"].astype(str).str.extract(r"(\d+)", expand=False)
+        df["numero_voo"] = pd.to_numeric(num, errors="coerce").astype("Int64")
     else:
-        # cria DF vazio com cabeçalho certo
         df = pd.DataFrame(columns=cols)
 
     # Persistência: data/CAPO_G{N}_YYYYMMDD_HHMMSS.xls
