@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import altair as alt
+import xlrd==2.0.1
 
 # ==========================
 # Configuração base do app
@@ -573,3 +574,4 @@ with abas[2]:
     render_empresa(view_all[view_all["EMPRESA"] == "MAXMILHAS"].copy(), "MAX", cor_barra=AMARELO)
 with abas[3]:
     render_empresa(view_all[view_all["EMPRESA"] == "123MILHAS"].copy(), "123", cor_barra=AMARELO)
+
