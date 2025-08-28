@@ -4,11 +4,11 @@ from pathlib import Path
 from typing import List, Optional
 import math
 import re
+
 import numpy as np
 import pandas as pd
 import streamlit as st
 import altair as alt
-import xlrd==2.0.1
 
 # ==========================
 # Configuração base do app
@@ -58,18 +58,22 @@ DATA_DIR_DEFAULT = find_data_dir(Path(__file__).resolve())
 @st.cache_data(show_spinner=False)
 def _list_files(data_dir: str, patterns: List[str] | None = None) -> List[Path]:
     p = Path(data_dir)
-    if not p.exists(): return []
+    if not p.exists():
+        return []
     pats = patterns or [
         "*.xlsx", "*.xls", "*.csv", "*.parquet",
         "FLIPMILHAS_*.*", "CAPOVIAGENS_*.*", "MAXMILHAS_*.*", "123MILHAS_*.*"
     ]
     out: List[Path] = []
-    for pat in pats: out.extend(sorted(p.glob(pat)))
+    for pat in pats:
+        out.extend(sorted(p.glob(pat)))
     # remove duplicatas preservando ordem
-    seen = set(); uniq: List[Path] = []
+    seen = set()
+    uniq: List[Path] = []
     for f in out:
         if f not in seen:
-            uniq.append(f); seen.add(f)
+            uniq.append(f)
+            seen.add(f)
     return uniq
 
 def _to_float_series(s: pd.Series | object) -> pd.Series:
@@ -87,21 +91,28 @@ def _to_float_series(s: pd.Series | object) -> pd.Series:
 
 def detect_empresa_from_filename(name: str) -> str:
     u = name.upper()
-    if re.match(r"^CAPOVIAGENS_", u, flags=re.I): return "CAPO VIAGENS"
-    if re.match(r"^FLIPMILHAS_", u, flags=re.I):  return "FLIPMILHAS"
-    if re.match(r"^MAXMILHAS_", u, flags=re.I):   return "MAXMILHAS"
-    if re.match(r"^123MILHAS_", u, flags=re.I):   return "123MILHAS"
-    if "FLIP" in u or "FLIPMILHAS" in u:          return "FLIPMILHAS"
-    if "CAPO" in u or "CAPOVIAGENS" in u:         return "CAPO VIAGENS"
-    if "MAX" in u and "MILHAS" in u:              return "MAXMILHAS"
-    if "123" in u and "MILHAS" in u:              return "123MILHAS"
+    if re.match(r"^CAPOVIAGENS_", u, flags=re.I):
+        return "CAPO VIAGENS"
+    if re.match(r"^FLIPMILHAS_", u, flags=re.I):
+        return "FLIPMILHAS"
+    if re.match(r"^MAXMILHAS_", u, flags=re.I):
+        return "MAXMILHAS"
+    if re.match(r"^123MILHAS_", u, flags=re.I):
+        return "123MILHAS"
+    if "FLIP" in u or "FLIPMILHAS" in u:
+        return "FLIPMILHAS"
+    if "CAPO" in u or "CAPOVIAGENS" in u:
+        return "CAPO VIAGENS"
+    if "MAX" in u and "MILHAS" in u:
+        return "MAXMILHAS"
+    if "123" in u and "MILHAS" in u:
+        return "123MILHAS"
     return "N/A"
 
 def _ensure_series(df: pd.DataFrame, col: str) -> pd.Series:
     """Sempre devolve uma Series do tamanho de df, mesmo se a coluna não existir."""
     if col in df.columns:
         return pd.Series(df[col])
-    # se df está vazio, devolve Series vazia
     n = len(df) if len(df) else 0
     return pd.Series([np.nan] * n)
 
@@ -117,7 +128,9 @@ def _norm_hhmmss(s: pd.Series) -> pd.Series:
     miss = t.isna()
     if miss.any():
         mtxt = txt[miss].str.extract(r"(?P<h>\d{1,2}):(?P<m>\d{2})(?::(?P<s>\d{2}))?")
-        hh = mtxt["h"].fillna("00"); mm = mtxt["m"].fillna("00"); ss = mtxt["s"].fillna("00")
+        hh = mtxt["h"].fillna("00")
+        mm = mtxt["m"].fillna("00")
+        ss = mtxt["s"].fillna("00")
         tloc = pd.to_datetime(hh + ":" + mm + ":" + ss, format="%H:%M:%S", errors="coerce")
         t = t.where(~miss, tloc)
     return t.dt.strftime("%H:%M:%S")
@@ -129,16 +142,54 @@ def _norm_ddmmaa_from_any_date(s: pd.Series) -> pd.Series:
     d = pd.to_datetime(s, dayfirst=False, errors="coerce")
     return d.dt.strftime("%d/%m/%Y")
 
+def _read_excel_safely(p: Path) -> pd.DataFrame:
+    """Lê Excel forçando engine adequada por extensão, com mensagens amigáveis."""
+    ext = p.suffix.lower()
+    if ext == ".xlsx":
+        try:
+            return pd.read_excel(p, engine="openpyxl")
+        except Exception:
+            # fallback: deixa o pandas decidir
+            return pd.read_excel(p)
+    elif ext == ".xls":
+        try:
+            return pd.read_excel(p, engine="xlrd")
+        except ImportError as e:
+            raise RuntimeError(
+                "Dependência ausente para ler .xls — instale xlrd>=2.0.1 (ex.: pip install xlrd==2.0.1)"
+            ) from e
+        except Exception as e:
+            # alguns .xls são HTML disfarçado; tenta ler como HTML
+            try:
+                dfs = pd.read_html(p.read_text(encoding="utf-8", errors="ignore"))
+                return dfs[0] if dfs else pd.DataFrame()
+            except Exception:
+                raise
+    else:
+        return pd.read_excel(p)
+
 @st.cache_data(show_spinner=False)
 def _read_one(path: str, mtime: float) -> pd.DataFrame:
-    p = Path(path); ext = p.suffix.lower()
+    p = Path(path)
+    ext = p.suffix.lower()
+
+    # === Leitura do arquivo ===
     if ext in (".xlsx", ".xls"):
-        df = pd.read_excel(p)
+        try:
+            df = _read_excel_safely(p)
+        except Exception as e:
+            # Mostra aviso no app e devolve vazio para não travar o painel
+            st.warning(f"Falha ao ler {p.name}: {e}")
+            return pd.DataFrame()
     elif ext == ".csv":
         for sep in [";", ","]:
-            try: df = pd.read_csv(p, sep=sep); break
-            except Exception: continue
-        else: df = pd.read_csv(p)
+            try:
+                df = pd.read_csv(p, sep=sep)
+                break
+            except Exception:
+                continue
+        else:
+            df = pd.read_csv(p)
     elif ext == ".parquet":
         df = pd.read_parquet(p)
     else:
@@ -147,7 +198,7 @@ def _read_one(path: str, mtime: float) -> pd.DataFrame:
     # ======= Normalização ESPECÍFICA CAPO =======
     original_lower = [str(c).strip().lower() for c in df.columns]
     is_capo_schema = set(
-        ["captura_data","captura_hora","trecho","antecedencia","data_voo","cia","valor_total"]
+        ["captura_data", "captura_hora", "trecho", "antecedencia", "data_voo", "cia", "valor_total"]
     ).issubset(set(original_lower))
 
     if is_capo_schema or detect_empresa_from_filename(p.name) == "CAPO VIAGENS":
@@ -173,15 +224,16 @@ def _read_one(path: str, mtime: float) -> pd.DataFrame:
         df_std["TRECHO"]          = trecho
         df_std["ADVP"]            = pd.to_numeric(advp, errors="coerce")
         df_std["DATA PARTIDA"]    = _norm_ddmmaa_from_any_date(data_voo)
-        df_std["HORA DA PARTIDA"] = _norm_hhmmss(hr_ida) if len(hr_ida) else pd.Series([np.nan]*len(df))
+        df_std["HORA DA PARTIDA"] = _norm_hhmmss(hr_ida) if len(hr_ida) else pd.Series([np.nan] * len(df))
         df_std["DATA CHEGADA"]    = df_std["DATA PARTIDA"]
-        df_std["HORA DA CHEGADA"] = _norm_hhmmss(hr_volta) if len(hr_volta) else pd.Series([np.nan]*len(df))
+        df_std["HORA DA CHEGADA"] = _norm_hhmmss(hr_volta) if len(hr_volta) else pd.Series([np.nan] * len(df))
         df_std["CIA DO VOO"]      = cia.astype(str).str.strip().str.upper()
         df_std["TARIFA"]          = _to_float_series(por_adulto)
         df_std["TX DE EMBARQUE"]  = _to_float_series(tx_emb)
-        df_std["TX DE SERVIÇO"]   = _to_float_series(tx_serv) if "taxa_servico" in df.columns else pd.Series([np.nan]*len(df))
+        df_std["TX DE SERVIÇO"]   = _to_float_series(tx_serv) if "taxa_servico" in df.columns else pd.Series([np.nan] * len(df))
         df_std["TOTAL"]           = _to_float_series(val_total)
-        df_std["NUMERO DO VOO"]   = n_voo
+        # Número do voo como número (quando possível)
+        df_std["NUMERO DO VOO"]   = pd.to_numeric(n_voo, errors="coerce")
 
         # Metadados
         df_std["ARQUIVO"] = p.name
@@ -245,7 +297,8 @@ def _read_one(path: str, mtime: float) -> pd.DataFrame:
         "TARIFA","TX DE EMBARQUE","TOTAL","CIA DO VOO"
     ]
     for c in required:
-        if c not in df.columns: df[c] = np.nan
+        if c not in df.columns:
+            df[c] = np.nan
 
     for c in ["TARIFA","TX DE EMBARQUE","TOTAL"]:
         df[c] = _to_float_series(df[c])
@@ -260,9 +313,11 @@ def _read_one(path: str, mtime: float) -> pd.DataFrame:
     df["BUSCA_DATETIME"]   = combo_dt("DATA DA BUSCA","HORA DA BUSCA")
     df["PARTIDA_DATETIME"] = combo_dt("DATA PARTIDA","HORA DA PARTIDA")
     df["CHEGADA_DATETIME"] = combo_dt("DATA CHEGADA","HORA DA CHEGADA")
-    df["HORA_HH"] = df["BUSCA_DATETIME"].dt.hour
-    df["ADVP"] = (df["PARTIDA_DATETIME"].dt.normalize() - df["BUSCA_DATETIME"].dt.normalize()).dt.days
-    df["ARQUIVO"] = p.name; df["CAMINHO"] = str(p); df["EMPRESA"] = detect_empresa_from_filename(p.name)
+    df["HORA_HH"]          = df["BUSCA_DATETIME"].dt.hour
+    df["ADVP"]             = (df["PARTIDA_DATETIME"].dt.normalize() - df["BUSCA_DATETIME"].dt.normalize()).dt.days
+    df["ARQUIVO"]          = p.name
+    df["CAMINHO"]          = str(p)
+    df["EMPRESA"]          = detect_empresa_from_filename(p.name)
 
     base = [
         "BUSCA_DATETIME","DATA DA BUSCA","HORA DA BUSCA","HORA_HH",
@@ -278,31 +333,38 @@ def _read_one(path: str, mtime: float) -> pd.DataFrame:
 @st.cache_data(show_spinner=True)
 def load_all(data_dir: str) -> pd.DataFrame:
     files = _list_files(data_dir)
-    if not files: return pd.DataFrame()
+    if not files:
+        return pd.DataFrame()
     parts = []
     for f in files:
         try:
             parts.append(_read_one(str(f), f.stat().st_mtime))
         except Exception as e:
             st.warning(f"Falha ao ler {f.name}: {e}")
-    if not parts: return pd.DataFrame()
+    if not parts:
+        return pd.DataFrame()
     df = pd.concat(parts, ignore_index=True)
     df = df.sort_values("BUSCA_DATETIME", ascending=False, kind="stable")
     return df
 
 def fmt_moeda0(v) -> str:
     try:
-        if pd.isna(v): return "-"
+        if pd.isna(v):
+            return "-"
         return "R$ " + f"{int(round(float(v))):,}".replace(",", ".")
-    except Exception: return "-"
+    except Exception:
+        return "-"
 
 def fmt_pontos(v: float) -> str:
-    try: return f"{int(round(float(v))):,}".replace(",", ".")
-    except Exception: return "-"
+    try:
+        return f"{int(round(float(v))):,}".replace(",", ".")
+    except Exception:
+        return "-"
 
 # ============== utils p/ eixo dinâmico ==============
 def _nice_ceil(value: float, step: int = 50) -> int:
-    if not np.isfinite(value) or value <= 0: return step
+    if not np.isfinite(value) or value <= 0:
+        return step
     return int(math.ceil(value / step) * step)
 
 def dynamic_limit(series: pd.Series, hard_cap: Optional[int]) -> int:
@@ -310,7 +372,8 @@ def dynamic_limit(series: pd.Series, hard_cap: Optional[int]) -> int:
     vmax = float(np.nanmax(s.values)) if len(s) else 0.0
     pad  = max(50.0, 0.10 * vmax)
     y    = _nice_ceil(vmax + pad, step=50)
-    if hard_cap is not None: y = min(y, int(hard_cap))
+    if hard_cap is not None:
+        y = min(y, int(hard_cap))
     return max(y, 100)
 
 # ======================================================
@@ -319,20 +382,27 @@ def dynamic_limit(series: pd.Series, hard_cap: Optional[int]) -> int:
 with st.spinner("Lendo planilhas da pasta data/…"):
     df_all = load_all(DATA_DIR_DEFAULT)
 if df_all.empty:
-    st.info("Nenhum arquivo lido. Verifique a pasta data/."); st.stop()
+    st.info("Nenhum arquivo lido. Verifique a pasta data/.")
+    st.stop()
 
 min_d = df_all["BUSCA_DATETIME"].dropna().min()
 max_d = df_all["BUSCA_DATETIME"].dropna().max()
 
-c1, c2, c3, c4, c5 = st.columns([1.2,1.2,1.6,3.4,1.6])
-d_ini = c1.date_input("Data inicial",
+c1, c2, c3, c4, c5 = st.columns([1.2, 1.2, 1.6, 3.4, 1.6])
+d_ini = c1.date_input(
+    "Data inicial",
     value=min_d.date() if pd.notna(min_d) else None,
     min_value=min_d.date() if pd.notna(min_d) else None,
-    max_value=max_d.date() if pd.notna(max_d) else None, format="DD/MM/YYYY")
-d_fim = c2.date_input("Data final",
+    max_value=max_d.date() if pd.notna(max_d) else None,
+    format="DD/MM/YYYY",
+)
+d_fim = c2.date_input(
+    "Data final",
     value=max_d.date() if pd.notna(max_d) else None,
     min_value=min_d.date() if pd.notna(min_d) else None,
-    max_value=max_d.date() if pd.notna(max_d) else None, format="DD/MM/YYYY")
+    max_value=max_d.date() if pd.notna(max_d) else None,
+    format="DD/MM/YYYY",
+)
 
 advp_opts   = sorted([int(x) for x in df_all["ADVP"].dropna().unique()])
 trecho_opts = sorted([str(x) for x in df_all["TRECHO"].dropna().unique() if str(x).strip()])
@@ -346,9 +416,12 @@ mask = pd.Series(True, index=df_all.index)
 if d_ini and d_fim:
     d0, d1 = pd.to_datetime(d_ini), pd.to_datetime(d_fim)
     mask &= df_all["BUSCA_DATETIME"].dt.date.between(d0.date(), d1.date())
-if advp_sel:   mask &= df_all["ADVP"].isin(advp_sel)
-if trecho_sel: mask &= df_all["TRECHO"].isin(trecho_sel)
-if hora_sel:   mask &= df_all["HORA_HH"].isin(hora_sel)
+if advp_sel:
+    mask &= df_all["ADVP"].isin(advp_sel)
+if trecho_sel:
+    mask &= df_all["TRECHO"].isin(trecho_sel)
+if hora_sel:
+    mask &= df_all["HORA_HH"].isin(hora_sel)
 
 view_all = df_all.loc[mask].copy()
 st.caption(
@@ -359,42 +432,55 @@ st.markdown("---")
 # ======================================================
 # Helpers de gráfico
 # ======================================================
-def x_axis(enc: str, title: Optional[str]=None):
-    return alt.X(enc, axis=alt.Axis(title=title, labelAngle=0, labelOverlap=True,
-                                    labelFontWeight="bold", labelColor=CINZA_TXT))
-def y_axis(enc: str, title: str="PREÇO", domain=None):
-    return alt.Y(enc, axis=alt.Axis(title=title, format=".0f",
-                                    labelFontWeight="bold", labelColor=CINZA_TXT),
-                 scale=alt.Scale(domain=domain) if domain is not None else alt.Undefined)
+def x_axis(enc: str, title: Optional[str] = None):
+    return alt.X(
+        enc,
+        axis=alt.Axis(title=title, labelAngle=0, labelOverlap=True, labelFontWeight="bold", labelColor=CINZA_TXT),
+    )
 
-def barras_com_tendencia(df: pd.DataFrame, x_col: str, y_col: str, x_type: str,
-                         titulo: str, *, x_title: Optional[str]=None,
-                         y_max: Optional[int]=None, sort=None, bar_color: str = AMARELO):
-    df = df.copy(); df["_LABEL"] = df[y_col].apply(fmt_pontos)
+def y_axis(enc: str, title: str = "PREÇO", domain=None):
+    return alt.Y(
+        enc,
+        axis=alt.Axis(title=title, format=".0f", labelFontWeight="bold", labelColor=CINZA_TXT),
+        scale=alt.Scale(domain=domain) if domain is not None else alt.Undefined,
+    )
+
+def barras_com_tendencia(
+    df: pd.DataFrame,
+    x_col: str,
+    y_col: str,
+    x_type: str,
+    titulo: str,
+    *,
+    x_title: Optional[str] = None,
+    y_max: Optional[int] = None,
+    sort=None,
+    bar_color: str = AMARELO,
+):
+    df = df.copy()
+    df["_LABEL"] = df[y_col].apply(fmt_pontos)
 
     base = alt.Chart(df).encode(
-        x=(x_axis(f"{x_col}:{x_type}", title=x_title).sort(sort)
-           if sort is not None else x_axis(f"{x_col}:{x_type}", title=x_title)),
+        x=(x_axis(f"{x_col}:{x_type}", title=x_title).sort(sort) if sort is not None else x_axis(f"{x_col}:{x_type}", title=x_title)),
         y=y_axis(f"{y_col}:Q", domain=[0, y_max] if y_max else None),
         tooltip=[x_col, alt.Tooltip(y_col, format=",.0f")],
     )
     bars = base.mark_bar(color=bar_color)
 
-    labels = alt.Chart(df).encode(
-        x=(x_axis(f"{x_col}:{x_type}", title=x_title).sort(sort)
-           if sort is not None else x_axis(f"{x_col}:{x_type}", title=x_title)),
-        y=y_axis(f"{y_col}:Q", domain=[0, y_max] if y_max else None),
-        text=alt.Text("_LABEL:N"),
-    ).mark_text(
-        baseline="top", align="center", dy=14, color=CINZA_TXT,
-        fontWeight="bold", size=18,
+    labels = (
+        alt.Chart(df)
+        .encode(
+            x=(x_axis(f"{x_col}:{x_type}", title=x_title).sort(sort) if sort is not None else x_axis(f"{x_col}:{x_type}", title=x_title)),
+            y=y_axis(f"{y_col}:Q", domain=[0, y_max] if y_max else None),
+            text=alt.Text("_LABEL:N"),
+        )
+        .mark_text(baseline="top", align="center", dy=14, color=CINZA_TXT, fontWeight="bold", size=18)
     )
 
     line = (
         alt.Chart(df)
-        .mark_line(color=CINZA_TXT, opacity=0.95, strokeDash=[6,4])
-        .encode(x=x_axis(f"{x_col}:{x_type}", title=x_title),
-                y=y_axis(f"{y_col}:Q", domain=[0, y_max] if y_max else None))
+        .mark_line(color=CINZA_TXT, opacity=0.95, strokeDash=[6, 4])
+        .encode(x=x_axis(f"{x_col}:{x_type}", title=x_title), y=y_axis(f"{y_col}:Q", domain=[0, y_max] if y_max else None))
     )
 
     ch = (bars + labels + line).properties(title=titulo, height=340)
@@ -405,7 +491,8 @@ def barras_com_tendencia(df: pd.DataFrame, x_col: str, y_col: str, x_type: str,
 # ==========================
 def chart_cia_stack_trecho(df_emp: pd.DataFrame):
     if df_emp.empty:
-        st.info("Sem dados para os filtros atuais."); return
+        st.info("Sem dados para os filtros atuais.")
+        return
 
     cia_raw = df_emp["CIA DO VOO"].astype(str).str.upper()
     df = df_emp.copy()
@@ -416,30 +503,26 @@ def chart_cia_stack_trecho(df_emp: pd.DataFrame):
     )
     df = df[df["CIA3"].isin(["AZUL", "GOL", "LATAM"])]
     if df.empty:
-        st.info("Sem AZUL/GOL/LATAM para este filtro."); return
+        st.info("Sem AZUL/GOL/LATAM para este filtro.")
+        return
 
     base = alt.Chart(df)
     bars = (
         base.mark_bar()
         .encode(
             x=x_axis("TRECHO:N"),
-            y=alt.Y("count():Q", stack="normalize",
-                    axis=alt.Axis(format=".0%", title=""),
-                    scale=alt.Scale(domain=[0, 1.2])),
+            y=alt.Y("count():Q", stack="normalize", axis=alt.Axis(format=".0%", title=""), scale=alt.Scale(domain=[0, 1.2])),
             color=alt.Color(
                 "CIA3:N",
-                scale=alt.Scale(domain=["AZUL","GOL","LATAM"], range=[AZUL_COLOR, GOL_COLOR, LATAM_COLOR]),
+                scale=alt.Scale(domain=["AZUL", "GOL", "LATAM"], range=[AZUL_COLOR, GOL_COLOR, LATAM_COLOR]),
                 legend=alt.Legend(title="CIA"),
             ),
             order=alt.Order("CIA3:N", sort="ascending"),
         )
     )
     text = (
-        base
-        .transform_aggregate(count="count()", groupby=["TRECHO","CIA3"])
-        .transform_stack(stack="count", groupby=["TRECHO"],
-                         sort=[alt.SortField("CIA3", order="ascending")],
-                         as_=["y0","y1"], offset="normalize")
+        base.transform_aggregate(count="count()", groupby=["TRECHO", "CIA3"])
+        .transform_stack(stack="count", groupby=["TRECHO"], sort=[alt.SortField("CIA3", order="ascending")], as_=["y0", "y1"], offset="normalize")
         .transform_calculate(ycenter="(datum.y0 + datum.y1)/2", label="format(datum.y1 - datum.y0, '.0%')")
         .mark_text(baseline="middle", align="center", size=18, fontWeight="bold", color="#FFFFFF")
         .encode(x=x_axis("TRECHO:N"), y=alt.Y("ycenter:Q", scale=alt.Scale(domain=[0, 1.2])), text="label:N", detail="CIA3:N")
@@ -451,49 +534,71 @@ def chart_cia_stack_trecho(df_emp: pd.DataFrame):
 # ==========================
 def _fmt_currency_int(v):
     try:
-        if pd.isna(v): return "-"
+        if pd.isna(v):
+            return "-"
         return "R$ " + f"{int(round(float(v))):,}".replace(",", ".")
-    except Exception: return "-"
+    except Exception:
+        return "-"
 
 def _row_heat_css(row: pd.Series, price_cols: List[str]) -> pd.Series:
     vals = row[price_cols].astype(float).values
     styles = {c: "" for c in row.index}
-    if np.all(np.isnan(vals)): return pd.Series(styles)
-    vmin = np.nanmin(vals); vmax = np.nanmax(vals); rng = max(vmax - vmin, 1e-9)
+    if np.all(np.isnan(vals)):
+        return pd.Series(styles)
+    vmin = np.nanmin(vals)
+    vmax = np.nanmax(vals)
+    rng = max(vmax - vmin, 1e-9)
+
     def interp(v):
-        c0=(255,247,224); c1=(242,201,76); t=(v - vmin)/rng
-        r=int(c0[0]+t*(c1[0]-c0[0])); g=int(c0[1]+t*(c1[1]-c0[1])); b=int(c0[2]+t*(c1[2]-c0[2]))
+        c0 = (255, 247, 224)
+        c1 = (242, 201, 76)
+        t = (v - vmin) / rng
+        r = int(c0[0] + t * (c1[0] - c0[0]))
+        g = int(c0[1] + t * (c1[1] - c0[1]))
+        b = int(c0[2] + t * (c1[2] - c0[2]))
         return f"background-color: rgb({r},{g},{b});"
+
     for c in price_cols:
-        v=row[c]
-        if not pd.isna(v): styles[c]=interp(float(v))
+        v = row[c]
+        if not pd.isna(v):
+            styles[c] = interp(float(v))
     return pd.Series(styles)
 
 def top3_tabela(df_emp: pd.DataFrame, agg: str):
-    if agg not in ("min", "mean"): agg = "min"
+    if agg not in ("min", "mean"):
+        agg = "min"
     if agg == "min":
-        base = (df_emp.groupby(["TRECHO","ADVP"], as_index=False)["TOTAL"].min().rename(columns={"TOTAL":"VAL"}))
+        base = df_emp.groupby(["TRECHO", "ADVP"], as_index=False)["TOTAL"].min().rename(columns={"TOTAL": "VAL"})
     else:
-        base = (df_emp.groupby(["TRECHO","ADVP"], as_index=False)["TOTAL"].mean().rename(columns={"TOTAL":"VAL"}))
+        base = df_emp.groupby(["TRECHO", "ADVP"], as_index=False)["TOTAL"].mean().rename(columns={"TOTAL": "VAL"})
 
-    rows=[]
+    rows = []
     for trecho, sub in base.groupby("TRECHO", sort=True):
         top = sub.nsmallest(3, "VAL").reset_index(drop=True)
-        vals = top["VAL"].tolist(); advs = top["ADVP"].tolist()
-        rows.append({"TRECHO":trecho,
-                     "PREÇO TOP 1": vals[0] if len(vals)>0 else np.nan, "ADVP TOP 1":advs[0] if len(advs)>0 else np.nan,
-                     "PREÇO TOP 2": vals[1] if len(vals)>1 else np.nan, "ADVP TOP 2":advs[1] if len(advs)>1 else np.nan,
-                     "PREÇO TOP 3": vals[2] if len(vals)>2 else np.nan, "ADVP TOP 3":advs[2] if len(advs)>2 else np.nan})
+        vals = top["VAL"].tolist()
+        advs = top["ADVP"].tolist()
+        rows.append(
+            {
+                "TRECHO": trecho,
+                "PREÇO TOP 1": vals[0] if len(vals) > 0 else np.nan,
+                "ADVP TOP 1": advs[0] if len(advs) > 0 else np.nan,
+                "PREÇO TOP 2": vals[1] if len(vals) > 1 else np.nan,
+                "ADVP TOP 2": advs[1] if len(advs) > 1 else np.nan,
+                "PREÇO TOP 3": vals[2] if len(vals) > 2 else np.nan,
+                "ADVP TOP 3": advs[2] if len(advs) > 2 else np.nan,
+            }
+        )
     if not rows:
-        st.info("Sem dados para montar o Top 3 por trecho."); return
+        st.info("Sem dados para montar o Top 3 por trecho.")
+        return
 
     df_tbl = pd.DataFrame(rows).sort_values("TRECHO").reset_index(drop=True)
-    df_tbl.index = pd.RangeIndex(start=1, stop=len(df_tbl)+1, step=1)
+    df_tbl.index = pd.RangeIndex(start=1, stop=len(df_tbl) + 1, step=1)
     df_tbl.index.name = None
 
-    price_cols = ["PREÇO TOP 1","PREÇO TOP 2","PREÇO TOP 3"]
-    fmt_map = {c:_fmt_currency_int for c in price_cols}
-    fmt_map.update({"ADVP TOP 1":"{:.0f}","ADVP TOP 2":"{:.0f}","ADVP TOP 3":"{:.0f}"})
+    price_cols = ["PREÇO TOP 1", "PREÇO TOP 2", "PREÇO TOP 3"]
+    fmt_map = {c: _fmt_currency_int for c in price_cols}
+    fmt_map.update({"ADVP TOP 1": "{:.0f}", "ADVP TOP 2": "{:.0f}", "ADVP TOP 3": "{:.0f}"})
     sty = df_tbl.style.format(fmt_map, na_rep="-").apply(lambda r: _row_heat_css(r, price_cols), axis=1)
 
     st.markdown("<h5>Preço Top 3 preços por ADVP</h5>", unsafe_allow_html=True)
@@ -507,17 +612,19 @@ def render_empresa(df_emp: pd.DataFrame, key_suffix: str, *, cor_barra: str = AM
         "Menor preço",
         value=True,
         key=f"toggle_menor_preco_{key_suffix}",
-        help="Ligado: usa menor preço; Desligado: usa média. Vale para gráficos e tabela."
+        help="Ligado: usa menor preço; Desligado: usa média. Vale para gráficos e tabela.",
     )
 
     if df_emp.empty:
-        st.info("Sem dados para os filtros atuais."); return
+        st.info("Sem dados para os filtros atuais.")
+        return
 
     hard_cap = 1500 if menor_preco else 3000
 
     # KPIs
     k1, k2 = st.columns(2)
-    with k1: st.metric("Buscas", f"{len(df_emp):,}".replace(",", "."))
+    with k1:
+        st.metric("Buscas", f"{len(df_emp):,}".replace(",", "."))
     with k2:
         preco_val = df_emp["TOTAL"].min() if menor_preco else df_emp["TOTAL"].mean()
         st.metric("Preço", fmt_moeda0(preco_val))
@@ -525,36 +632,34 @@ def render_empresa(df_emp: pd.DataFrame, key_suffix: str, *, cor_barra: str = AM
     # 1) Preço por hora
     horas = pd.DataFrame({"HORA_HH": list(range(24))})
     if menor_preco:
-        by_hora = df_emp.groupby("HORA_HH", as_index=False)["TOTAL"].min().rename(columns={"TOTAL":"PRECO"})
+        by_hora = df_emp.groupby("HORA_HH", as_index=False)["TOTAL"].min().rename(columns={"TOTAL": "PRECO"})
     else:
-        by_hora = df_emp.groupby("HORA_HH", as_index=False)["TOTAL"].mean().rename(columns={"TOTAL":"PRECO"})
-    by_hora = horas.merge(by_hora, on="HORA_HH", how="left").fillna({"PRECO":0})
+        by_hora = df_emp.groupby("HORA_HH", as_index=False)["TOTAL"].mean().rename(columns={"TOTAL": "PRECO"})
+    by_hora = horas.merge(by_hora, on="HORA_HH", how="left").fillna({"PRECO": 0})
     y_max_hora = dynamic_limit(by_hora["PRECO"], hard_cap)
-    barras_com_tendencia(by_hora, "HORA_HH", "PRECO", "O",
-                         "Preço por hora", x_title="HORA",
-                         y_max=y_max_hora, sort=list(range(24)), bar_color=cor_barra)
+    barras_com_tendencia(
+        by_hora, "HORA_HH", "PRECO", "O", "Preço por hora", x_title="HORA", y_max=y_max_hora, sort=list(range(24)), bar_color=cor_barra
+    )
 
     # 2) Preço por ADVP
     if menor_preco:
-        by_advp = df_emp.groupby("ADVP", as_index=False)["TOTAL"].min().rename(columns={"TOTAL":"PRECO"}).sort_values("ADVP")
+        by_advp = df_emp.groupby("ADVP", as_index=False)["TOTAL"].min().rename(columns={"TOTAL": "PRECO"}).sort_values("ADVP")
     else:
-        by_advp = df_emp.groupby("ADVP", as_index=False)["TOTAL"].mean().rename(columns={"TOTAL":"PRECO"}).sort_values("ADVP")
+        by_advp = df_emp.groupby("ADVP", as_index=False)["TOTAL"].mean().rename(columns={"TOTAL": "PRECO"}).sort_values("ADVP")
     y_max_advp = dynamic_limit(by_advp["PRECO"], hard_cap)
-    barras_com_tendencia(by_advp, "ADVP", "PRECO", "O",
-                         "Preço por ADVP", y_max=y_max_advp, bar_color=cor_barra)
+    barras_com_tendencia(by_advp, "ADVP", "PRECO", "O", "Preço por ADVP", y_max=y_max_advp, bar_color=cor_barra)
 
     # 3) Preço Top 20 trechos
     if menor_preco:
-        by_trecho = (df_emp.groupby("TRECHO", as_index=False)["TOTAL"].min()
-                          .rename(columns={"TOTAL":"PRECO"})
-                          .sort_values("PRECO", ascending=False).head(20))
+        by_trecho = (
+            df_emp.groupby("TRECHO", as_index=False)["TOTAL"].min().rename(columns={"TOTAL": "PRECO"}).sort_values("PRECO", ascending=False).head(20)
+        )
     else:
-        by_trecho = (df_emp.groupby("TRECHO", as_index=False)["TOTAL"].mean()
-                          .rename(columns={"TOTAL":"PRECO"})
-                          .sort_values("PRECO", ascending=False).head(20))
+        by_trecho = (
+            df_emp.groupby("TRECHO", as_index=False)["TOTAL"].mean().rename(columns={"TOTAL": "PRECO"}).sort_values("PRECO", ascending=False).head(20)
+        )
     y_max_trecho = dynamic_limit(by_trecho["PRECO"], hard_cap)
-    barras_com_tendencia(by_trecho, "TRECHO", "PRECO", "N",
-                         "Preço Top 20 trechos", y_max=y_max_trecho, bar_color=cor_barra)
+    barras_com_tendencia(by_trecho, "TRECHO", "PRECO", "N", "Preço Top 20 trechos", y_max=y_max_trecho, bar_color=cor_barra)
 
     # 4) Tabela Top 3
     top3_tabela(df_emp, agg="min" if menor_preco else "mean")
@@ -565,7 +670,7 @@ def render_empresa(df_emp: pd.DataFrame, key_suffix: str, *, cor_barra: str = AM
 # ==========================
 # Abas
 # ==========================
-abas = st.tabs(["FLIPMILHAS","CAPO VIAGENS","MAXMILHAS","123MILHAS"])
+abas = st.tabs(["FLIPMILHAS", "CAPO VIAGENS", "MAXMILHAS", "123MILHAS"])
 with abas[0]:
     render_empresa(view_all[view_all["EMPRESA"] == "FLIPMILHAS"].copy(), "FLIPMILHAS", cor_barra=AMARELO)
 with abas[1]:
@@ -574,4 +679,3 @@ with abas[2]:
     render_empresa(view_all[view_all["EMPRESA"] == "MAXMILHAS"].copy(), "MAX", cor_barra=AMARELO)
 with abas[3]:
     render_empresa(view_all[view_all["EMPRESA"] == "123MILHAS"].copy(), "123", cor_barra=AMARELO)
-
