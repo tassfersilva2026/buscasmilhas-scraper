@@ -1,13 +1,14 @@
-name: scrape-capo-5partes
+name: scrape-capo-5partes-xls
 
 on:
   schedule:
-    - cron: "*/30 * * * *"   # rode fracionado como preferir
+    - cron: "*/30 * * * *"   # ajuste se quiser mais frequência
   workflow_dispatch:
 
 jobs:
   run:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: write
     env:
@@ -23,69 +24,62 @@ jobs:
           - { nome: G5, trechos: "GIG-SSA,SSA-GIG,BSB-SDU,SDU-BSB" }
 
     concurrency:
-      group: capo-${{ matrix.grupo.nome }}
+      group: capo-xls-${{ matrix.grupo.nome }}
       cancel-in-progress: false
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-python@v5
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      # Chrome + Chromedriver compatível
-      - uses: browser-actions/setup-chrome@v2
+      - name: Setup Chrome + Chromedriver
+        uses: browser-actions/setup-chrome@v2
         with:
           install-chromedriver: true
 
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then
-            pip install -r requirements.txt
-          else
-            pip install selenium pandas pyarrow openpyxl webdriver-manager
-          fi
-
-      # (Opcional) Ver layout do repo para depurar
-      - name: Repo layout (debug)
-        run: |
-          pwd
-          ls -la
-          echo "---- possíveis scripts ----"
-          find . -maxdepth 3 -type f -name "capoviagens_scraper*.py" -print
-
-      # Encontrar automaticamente o script correto
-      - name: Find scraper script
-        id: find
-        shell: bash
-        run: |
-          set -e
-          CAND=$(git ls-files | grep -E '^(.*/)?capoviagens_scraper(_gha)?\.py$' || true)
-          if [ -z "$CAND" ]; then
-            echo "ERRO: Não encontrei capoviagens_scraper.py nem capoviagens_scraper_gha.py no repo." >&2
-            exit 1
-          fi
-          # pega o primeiro match
-          CAND=$(echo "$CAND" | head -n1)
-          echo "script=$CAND" >> $GITHUB_OUTPUT
-          echo "Usando script: $CAND"
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          pip install xlwt
 
       - name: Run ${{ matrix.grupo.nome }}
         env:
           TRECHOS_CSV: ${{ matrix.grupo.trechos }}
           ADVPS_CSV: "1,5,11,17,30"
           GROUP_NAME: ${{ matrix.grupo.nome }}
-          WRITE_XLSX: "0"  # deixe "1" se também quiser XLSX
+          # Ajustes finos de robustez/velocidade (logs já detalhados no script)
+          WAIT_SECONDS: "12"
+          MAX_ATTEMPTS: "2"
+          SLEEP_RETRY: "4"
+          PAGELOAD_TIMEOUT: "30"
+          # Caminho do script; se não estiver na raiz, encontramos automaticamente:
+          SCRIPT_PATH: "capoviagens_scraper_gha.py"
+        shell: bash
         run: |
-          python "${{ steps.find.outputs.script }}"
+          set -e
+          if [ ! -f "$SCRIPT_PATH" ]; then
+            echo "Script não está na raiz. Procurando..."
+            FOUND=$(find . -maxdepth 3 -type f -name "capoviagens_scraper_gha.py" | head -n1 || true)
+            if [ -z "$FOUND" ]; then
+              echo "ERRO: capoviagens_scraper_gha.py não encontrado." >&2
+              exit 1
+            fi
+            SCRIPT_PATH="$FOUND"
+            echo "Usando script: $SCRIPT_PATH"
+          fi
+          python "$SCRIPT_PATH"
 
-      - name: Commit artifacts
+      - name: Commit XLS files
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add data/*.parquet data/*.xlsx 2>/dev/null || true
-          git commit -m "capo ${{ matrix.grupo.nome }} $(date -u +'%Y-%m-%dT%H:%M:%SZ')" || echo "nada a commitar"
+          git add data/*.xls 2>/dev/null || true
+          git commit -m "CAPO ${{ matrix.grupo.nome }} XLS $(date -u +'%Y-%m-%dT%H:%M:%SZ')" || echo "nada a commitar"
           git push || true
