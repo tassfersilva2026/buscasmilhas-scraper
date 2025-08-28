@@ -1,9 +1,15 @@
-streamlit
-pandas
-numpy
-openpyxl
-xlsxwriter
+# App base
+streamlit>=1.33
+pandas==2.2.2
+numpy>=1.24,<2.1
+altair>=5.3
+
+# Arquivos
+pyarrow==17.0.0     # para .parquet
+openpyxl>=3.1.2     # .xlsx
+xlrd==2.0.1         # .xls (apenas formato antigo)
+xlsxwriter>=3.2.0   # opcional: ao exportar .xlsx com engine="xlsxwriter"
+
+# Automação (se precisar em outros scripts)
 selenium>=4.24.0
-openpyxl>=3.1.2
 pytz
-xlrd==2.0.1
