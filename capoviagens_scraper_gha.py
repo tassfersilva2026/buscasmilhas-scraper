@@ -1,25 +1,30 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Capo Viagens — Scraper para GitHub Actions (Parquet + grupos)
-- Gera PARQUET incremental (timestamp) e um PARQUET fixo por grupo (overwrite)
-- Opcional: também salva XLSX se WRITE_XLSX=1
-- Pastas/nomes:
-  - data/CAPOVIAGENS_YYYYMMDD_HHMMSS.parquet   (sempre)
-  - data/CAPO_<GROUP_NAME>.parquet             (se GROUP_NAME definido)
-  - data/CAPOVIAGENS_YYYYMMDD_HHMMSS.xlsx      (se WRITE_XLSX=1)
+Capo Viagens — Scraper para GitHub Actions (LOG detalhado + saída XLS por grupo)
+- Gera **apenas XLS** em data/CAPO_G{N}_YYYYMMDD_HHMMSS.xls (um arquivo por parte)
+- Aba: BUSCAS
+- Requer env GROUP_NAME=G1..G5 (ou CLI --group-name G1)
+- ADVP padrão: 1,5,11,17,30 (pode sobrescrever via ADVPS_CSV)
 
-Parâmetros (env ou CLI):
-- TRECHOS_CSV="CGH-SDU,SDU-CGH,..."      -> sobrescreve TRECHOS padrão
-- ADVPS_CSV="1,5,11,17,30"               -> sobrescreve ADVP_LIST padrão
-- GROUP_NAME="G1"                        -> nome do grupo para arquivo fixo
-- SLICE_IDX=0 TOTAL_SLICES=1             -> fatiamento opcional (matrix/rodízio)
+ENV/CLI:
+  TRECHOS_CSV="CGH-SDU,SDU-CGH,..."   | --trechos
+  ADVPS_CSV="1,5,11,17,30"            | --advps
+  GROUP_NAME="G1"                      | --group-name
+  WAIT_SECONDS=12                      | --wait-seconds
+  MAX_ATTEMPTS=2                       | --attempts
+  SLEEP_RETRY=4                        | --sleep-retry
+  PAGELOAD_TIMEOUT=30                  | --pageload-timeout
+  SLICE_IDX / TOTAL_SLICES             | --slice-idx / --total-slices
+
+Dependências mínimas: selenium, pandas, xlwt, pyarrow (não usado aqui), webdriver-manager (opcional)
 """
 
 import os
 import re
 import time
 import argparse
+import logging
 from pathlib import Path
 from datetime import datetime, timedelta
 
@@ -33,7 +38,6 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
 # ====================== LISTAS PADRÃO ======================
-# ADVP padrão já no conjunto solicitado
 ADVP_LIST = [1, 5, 11, 17, 30]
 TRECHOS = [
     ("CGH", "SDU"), ("SDU", "CGH"),
@@ -51,12 +55,15 @@ TRECHOS = [
 
 def _parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument("--trechos", type=str, default=os.getenv("TRECHOS_CSV", ""))   # "A-B,C-D"
-    p.add_argument("--advps",   type=str, default=os.getenv("ADVPS_CSV", ""))     # "1,5,11,17,30"
+    p.add_argument("--trechos", type=str, default=os.getenv("TRECHOS_CSV", ""))     # "A-B,C-D"
+    p.add_argument("--advps",   type=str, default=os.getenv("ADVPS_CSV", ""))       # "1,5,11,17,30"
+    p.add_argument("--group-name", type=str, default=os.getenv("GROUP_NAME", ""))   # "G1"
+    p.add_argument("--wait-seconds", type=int, default=int(os.getenv("WAIT_SECONDS", "12")))
+    p.add_argument("--attempts", type[int], default=int(os.getenv("MAX_ATTEMPTS", "2")))
+    p.add_argument("--sleep-retry", type=int, default=int(os.getenv("SLEEP_RETRY", "4")))
+    p.add_argument("--pageload-timeout", type=int, default=int(os.getenv("PAGELOAD_TIMEOUT", "30")))
     p.add_argument("--slice-idx", type=int, default=int(os.getenv("SLICE_IDX", "0")))
     p.add_argument("--total-slices", type=int, default=int(os.getenv("TOTAL_SLICES", "1")))
-    p.add_argument("--group-name", type=str, default=os.getenv("GROUP_NAME", "")) # "G1"
-    p.add_argument("--write-xlsx", type=int, default=int(os.getenv("WRITE_XLSX", "0")))
     return p.parse_args()
 
 def _resolve_lists(args):
@@ -76,8 +83,20 @@ def _resolve_lists(args):
         advps = [int(x) for x in re.split(r"[;,]\s*", raw_a) if x]
     return trechos, advps
 
-def _make_driver(wait_seconds: int = 20) -> tuple[webdriver.Chrome, WebDriverWait]:
+def _setup_logging():
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s | %(levelname)s | %(message)s",
+        datefmt="%H:%M:%S",
+        force=True,
+    )
+
+def _make_driver(wait_seconds: int = 12, pageload_timeout: int = 30) -> tuple[webdriver.Chrome, WebDriverWait]:
     opts = ChromeOptions()
+    try:
+        opts.page_load_strategy = "eager"
+    except Exception:
+        pass
     opts.add_argument("--headless=new")
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
@@ -95,12 +114,17 @@ def _make_driver(wait_seconds: int = 20) -> tuple[webdriver.Chrome, WebDriverWai
             from webdriver_manager.chrome import ChromeDriverManager
             service = Service(ChromeDriverManager().install())
         except Exception:
-            service = Service()  # fallback (driver no PATH)
+            service = Service()  # driver no PATH
 
     if chrome_bin:
         opts.binary_location = chrome_bin
 
     driver = webdriver.Chrome(service=service, options=opts)
+    try:
+        driver.set_page_load_timeout(pageload_timeout)
+    except Exception:
+        pass
+
     wait = WebDriverWait(driver, wait_seconds)
     return driver, wait
 
@@ -137,6 +161,16 @@ def run_once(args=None) -> Path:
     if args is None:
         args = _parse_args()
 
+    _setup_logging()
+    logging.info("==== Iniciando CapoScraper (XLS por grupo) ====")
+    if not args.group_name:
+        logging.warning("GROUP_NAME não informado. Usarei 'G0' no nome do arquivo.")
+    grupo = args.group_name or "G0"
+
+    logging.info(f"Grupo: {grupo} | ADVPS={os.getenv('ADVPS_CSV', '') or ADVP_LIST} | "
+                 f"WAIT={args.wait_seconds}s | ATTEMPTS={args.attempts} | RETRY_SLEEP={args.sleep_retry}s | "
+                 f"PAGELOAD_TIMEOUT={args.pageload_timeout}s")
+
     trechos, advps = _resolve_lists(args)
     combos = [((o, d), a) for (o, d) in trechos for a in advps]
 
@@ -144,68 +178,90 @@ def run_once(args=None) -> Path:
     idx   = int(args.slice_idx) % total if total > 1 else 0
     selected = [combos[i] for i in range(len(combos)) if (total == 1 or i % total == idx)]
 
-    print(f"[INFO] TRECHOS: {trechos}")
-    print(f"[INFO] ADVPs: {advps}")
-    if total > 1:
-        print(f"[INFO] Slice {idx+1}/{total} -> {len(selected)} combinações")
+    logging.info(f"Total combos: {len(combos)} | Slice: {idx+1}/{total} | Executando: {len(selected)} combos")
+    logging.info(f"TRECHOS alvo: {trechos}")
+    logging.info(f"ADVPs alvo:   {advps}")
 
-    driver, wait = _make_driver(wait_seconds=20)
+    driver, wait = _make_driver(wait_seconds=args.wait_seconds, pageload_timeout=args.pageload_timeout)
 
     results: list[dict] = []
     now = datetime.now()
     iter_ts = now.strftime("%Y%m%d_%H%M%S")
     captura_data = now.strftime("%Y-%m-%d")
     captura_hora = now.strftime("%H:%M:%S")
-    captura_ts   = pd.Timestamp.now(tz="America/Sao_Paulo").tz_localize(None)
+
+    ok_cnt = 0
+    vazio_cnt = 0
+    erros_cnt = 0
+    t0_run = time.time()
 
     try:
-        for (orig, dest), dias in selected:
+        for i, ((orig, dest), dias) in enumerate(selected, start=1):
+            t0 = time.time()
             trecho_str = f"{orig}-{dest}"
             target_date = datetime.now() + timedelta(days=dias)
             search_date_str = target_date.strftime("%Y-%m-%d")
+            url = (
+                f"https://www.capoviagens.com.br/voos/"
+                f"?fromAirport={orig}&toAirport={dest}"
+                f"&departureDate={search_date_str}"
+                f"&adult=1&child=0&cabin=Basic&isTwoWays=false"
+            )
 
+            logging.info(f"[{i}/{len(selected)}] INÍCIO combo | Trecho={trecho_str} | ADVP={dias} | URL={url}")
             tent = 1
-            print(f"[{trecho_str} | ADVP {dias}] {captura_hora} — iniciando…")
-            while tent <= 3:
-                url = (
-                    f"https://www.capoviagens.com.br/voos/"
-                    f"?fromAirport={orig}&toAirport={dest}"
-                    f"&departureDate={search_date_str}"
-                    f"&adult=1&child=0&cabin=Basic&isTwoWays=false"
-                )
-                driver.get(url)
-
-                cia           = _capturar(wait, XPATH["cia"])
-                hr_ida        = _capturar(wait, XPATH["hr_ida"])
-                hr_volta      = _capturar(wait, XPATH["hr_volta"])
-                por_adulto    = _capturar(wait, XPATH["por_adulto"])
-                taxa_embarque = _capturar(wait, XPATH["taxa_embarque"])
-                taxa_servico  = _capturar(wait, XPATH["taxa_servico"])
-                valor_total   = _capturar(wait, XPATH["valor_total"])
-
-                if cia or valor_total:
-                    break
-                tent += 1
-                print("  Sem dados visíveis. Nova tentativa em 5s…")
-                time.sleep(5)
-
-            # Número do voo (opcional)
+            cia = hr_ida = hr_volta = por_adulto = taxa_embarque = taxa_servico = valor_total = ""
             num_voo = ""
-            try:
-                btn = wait.until(EC.element_to_be_clickable((By.XPATH, XPATH["buy_button"])))
-                btn.click()
-                time.sleep(2)
-                num_voo = _capturar(wait, XPATH["flight_num"], cond=EC.presence_of_element_located)
-            except Exception:
-                pass
 
-            print(f"  -> cia={cia} ida={hr_ida} volta={hr_volta} total={valor_total} voo={num_voo}")
+            while tent <= max(1, args.attempts):
+                try:
+                    t_nav0 = time.time()
+                    driver.get(url)
+                    t_nav = time.time() - t_nav0
+                    logging.info(f"  Tentativa {tent}/{args.attempts} | Navegação OK em {t_nav:.1f}s")
+
+                    cia           = _capturar(wait, XPATH["cia"])
+                    hr_ida        = _capturar(wait, XPATH["hr_ida"])
+                    hr_volta      = _capturar(wait, XPATH["hr_volta"])
+                    por_adulto    = _capturar(wait, XPATH["por_adulto"])
+                    taxa_embarque = _capturar(wait, XPATH["taxa_embarque"])
+                    taxa_servico  = _capturar(wait, XPATH["taxa_servico"])
+                    valor_total   = _capturar(wait, XPATH["valor_total"])
+
+                    logging.info(f"    Capturado: cia='{cia}' ida='{hr_ida}' volta='{hr_volta}' total='{valor_total}'")
+
+                    if cia or valor_total:
+                        try:
+                            btn = wait.until(EC.element_to_be_clickable((By.XPATH, XPATH["buy_button"])))
+                            btn.click()
+                            time.sleep(2)
+                            num_voo = _capturar(wait, XPATH["flight_num"], cond=EC.presence_of_element_located)
+                            logging.info(f"    Número do voo: '{num_voo}'")
+                        except Exception:
+                            logging.info("    Número do voo não disponível (segue).")
+                        break
+
+                    tent += 1
+                    if tent <= args.attempts:
+                        logging.info(f"    Sem dados visíveis. Aguardando {args.sleep_retry}s para nova tentativa…")
+                        time.sleep(args.sleep_retry)
+
+                except Exception as e:
+                    logging.warning(f"  Erro tentativa {tent}: {e}")
+                    tent += 1
+                    if tent <= args.attempts:
+                        time.sleep(args.sleep_retry)
+
+            if not (cia or valor_total):
+                vazio_cnt += 1
+                logging.info("  >> Sem dados após tentativas. Registrando linha vazia (Sem Ofertas).")
+            else:
+                ok_cnt += 1
 
             results.append({
-                "captura_data": captura_data,      # string ISO (YYYY-MM-DD)
-                "captura_hora": captura_hora,      # string HH:MM:SS
-                "captura_ts":   captura_ts,        # timestamp para ordenação no app
-                "grupo":        (args.group_name or ""),  # nome do grupo (se houver)
+                "captura_data": captura_data,
+                "captura_hora": captura_hora,
+                "grupo":        grupo,
                 "trecho": trecho_str,
                 "antecedencia": dias,
                 "data_voo": search_date_str,
@@ -218,48 +274,55 @@ def run_once(args=None) -> Path:
                 "valor_total": valor_total,
                 "numero_voo": num_voo,
             })
+
+            dt = time.time() - t0
+            logging.info(f"[{i}/{len(selected)}] FIM combo | Duração {dt:.1f}s | OK_acum={ok_cnt} | Vazio={vazio_cnt} | Erros={erros_cnt}")
+
+    except Exception as e:
+        erros_cnt += 1
+        logging.error(f"[FATAL] Erro geral de execução: {e}")
     finally:
-        driver.quit()
+        try:
+            driver.quit()
+        except Exception:
+            pass
 
+    # DataFrame e limpeza
     df = pd.DataFrame(results)
-
-    # Ordena e padroniza campos numéricos
-    base_cols = ["captura_data", "captura_hora", "captura_ts", "grupo", "trecho", "antecedencia", "data_voo"]
+    base_cols = ["captura_data", "captura_hora", "grupo", "trecho", "antecedencia", "data_voo"]
     rest = [c for c in df.columns if c not in base_cols]
-    df = df[base_cols + rest]
+    if not df.empty:
+        df = df[base_cols + rest]
+        for col in ["por_adulto", "taxa_embarque", "taxa_servico", "valor_total"]:
+            df[col] = df[col].apply(_parse_money).round(2)
+    else:
+        logging.warning("Nenhum resultado coletado neste run.")
 
-    for col in ["por_adulto", "taxa_embarque", "taxa_servico", "valor_total"]:
-        df[col] = df[col].apply(_parse_money).astype("float64")
-
-    # Persistência
+    # Persistência: sempre XLS com nome CAPO_G{N}_YYYYMMDD_HHMMSS.xls em data/
     root = Path(__file__).resolve().parent
     data_dir = root / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
 
-    # 1) arquivo incremental com timestamp
-    ts_name = f"CAPOVIAGENS_{iter_ts}.parquet"
-    out_parquet = data_dir / ts_name
-    df.to_parquet(out_parquet, index=False, engine="pyarrow")
-    print(f"OK: PARQUET gerado em {out_parquet}")
+    iter_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    xls_path = data_dir / f"CAPO_{grupo}_{iter_ts}.xls"
 
-    # 2) arquivo fixo por grupo (overwrite) — facilita leitura fracionada no app
-    if args.group_name:
-        fixed_parquet = data_dir / f"CAPO_{args.group_name}.parquet"
-        df.to_parquet(fixed_parquet, index=False, engine="pyarrow")
-        print(f"OK: PARQUET por grupo atualizado em {fixed_parquet}")
+    try:
+        # exige xlwt
+        with pd.ExcelWriter(xls_path, engine="xlwt") as wr:
+            df.to_excel(wr, sheet_name="BUSCAS", index=False)
+        logging.info(f"[SAVE] XLS: {xls_path}")
+    except Exception as e:
+        logging.error(f"[ERRO] Falha ao salvar XLS (instale xlwt): {e}")
+        raise
 
-    # 3) opcional: XLSX, se precisar compatibilidade
-    if args.write_xlsx == 1:
-        try:
-            import openpyxl  # garante engine
-            xlsx_path = data_dir / f"CAPOVIAGENS_{iter_ts}.xlsx"
-            with pd.ExcelWriter(xlsx_path, engine="openpyxl") as wr:
-                df.to_excel(wr, index=False)
-            print(f"OK: XLSX gerado em {xlsx_path}")
-        except Exception as e:
-            print(f"[WARN] Falha ao gerar XLSX: {e}")
+    total_exec = time.time() - t0_run
+    logging.info("==== RESUMO ====")
+    logging.info(f"Combos executados: {len(selected)}")
+    logging.info(f"OK: {ok_cnt} | Sem Ofertas: {vazio_cnt} | Erros: {erros_cnt}")
+    logging.info(f"Duração total: {total_exec:.1f}s")
+    logging.info("==== FIM ====")
 
-    return out_parquet
+    return xls_path
 
 if __name__ == "__main__":
     run_once()
