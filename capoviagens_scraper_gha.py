@@ -1,446 +1,196 @@
-# capoviagens_scraper_gha.py — GitHub Actions / Local (1 ciclo por padrão)
-# Colhe 1º card da Capo Viagens com estratégias anti-“skeleton”
-# CLI: --saida data [--file CAPOVIAGENS.xlsx] --headless --once
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Capo Viagens — Scraper para GitHub Actions
+- Headless (Chrome) e robusto p/ Actions
+- 1 iteração por execução (sem loop infinito)
+- Salva saída em data/CAPOVIAGENS_YYYYMMDD_HHMMSS.xlsx
 
-import os, re, time, argparse, logging
-from datetime import datetime, timedelta, date, time as dtime
-from decimal import Decimal, InvalidOperation
-from zoneinfo import ZoneInfo
-from zipfile import ZipFile
+Depêndencias: ver requirements.txt
+"""
 
-from openpyxl import Workbook, load_workbook
-from openpyxl.utils import get_column_letter
-from openpyxl.styles import Alignment
+import os
+import re
+import time
+from pathlib import Path
+from datetime import datetime, timedelta
 
-# Selenium
+import pandas as pd
+
 from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service as ChromeService
 from selenium.webdriver.common.by import By
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.options import Options as ChromeOptions
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException
 
-# ============================= CONFIG =============================
-VERSION = "capo-gha-v2.0"
-TZ = ZoneInfo("America/Sao_Paulo")
-SHEET_NAME = "BUSCAS"
-CENTER = Alignment(horizontal="center", vertical="center")
+# fallback inteligente: usa chromedriver do setup-chrome se existir; senão, webdriver_manager
+def _make_driver(wait_seconds: int = 20) -> tuple[webdriver.Chrome, WebDriverWait]:
+    opts = ChromeOptions()
+    opts.add_argument("--headless=new")
+    opts.add_argument("--no-sandbox")
+    opts.add_argument("--disable-dev-shm-usage")
+    opts.add_argument("--window-size=1920,1080")
+    opts.add_argument("--disable-gpu")
+    opts.add_argument("--start-maximized")
 
-# Trechos/ADVP solicitados (os mesmos que você usa no local)
-ADVP_LIST = [1, 3, 7, 14, 21, 30, 60, 90]
-TRECHOS = [
-    ("CGH", "SDU"), ("SDU", "CGH"),
-    ("GRU", "POA"), ("POA", "GRU"),
-    ("CGH", "GIG"), ("GIG", "CGH"),
-    ("BSB", "CGH"), ("CGH", "BSB"),
-    ("CGH", "REC"), ("REC", "CGH"),
-    ("CGH", "SSA"), ("SSA", "CGH"),
-    ("BSB", "GIG"), ("GIG", "BSB"),
-    ("GIG", "REC"), ("REC", "GIG"),
-    ("GIG", "SSA"), ("SSA", "GIG"),
-    ("BSB", "SDU"), ("SDU", "BSB"),
-]
+    # Usa binários do action 'browser-actions/setup-chrome@v2' se presentes:
+    chrome_bin = os.environ.get("GOOGLE_CHROME_SHIM") or os.environ.get("CHROME_BIN")
+    chrome_driver_dir = os.environ.get("CHROMEWEBDRIVER")
 
-
-# URL da Capo
-def build_url(trecho: str, advp_days: int) -> tuple[str, date]:
-    orig, dest = trecho.split("-")
-    dep_date = (datetime.now(TZ).date() + timedelta(days=advp_days))
-    url = ("https://www.capoviagens.com.br/voos/"
-           f"?fromAirport={orig}&toAirport={dest}&departureDate={dep_date.strftime('%Y-%m-%d')}"
-           "&adult=1&child=0&cabin=Basic&isTwoWays=false")
-    return url, dep_date
-
-# ============================= Regex/Heurísticas =============================
-PRICE_RE = re.compile(r'R\$\s*\d{1,3}(?:\.\d{3})*,\d{2}')
-TIME_RE  = re.compile(r'\b\d{2}:\d{2}(?::\d{2})?\b')
-
-def wait_results_ready(driver, max_wait=25):
-    """Espera até o <main> ter texto com 'R$' ou HH:MM (evita skeleton)."""
-    t0 = time.time()
-    while time.time() - t0 < max_wait:
-        try:
-            root = driver.find_element(By.XPATH, "//main")
-            txt = (root.text or "").strip()
-            if PRICE_RE.search(txt) or TIME_RE.search(txt):
-                return True
-        except Exception:
-            pass
-        time.sleep(1)
-    return False
-
-def scroll_jiggle(driver):
-    try:
-        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-        time.sleep(0.3)
-        driver.execute_script("window.scrollTo(0, 0);")
-        time.sleep(0.2)
-    except Exception:
-        pass
-
-def first_visible_card(driver):
-    """Tenta pegar o 1º card clicável da lista (robusto a pequenas mudanças)."""
-    X_CANDIDATES = [
-        "//main//label[contains(@class,'cursor-pointer')][1]",
-        "//*[@id='__next']//main//label[1]",
-        "//*[@id='__next']//main//div[@role='radiogroup']//label[1]",
-    ]
-    for xp in X_CANDIDATES:
-        try:
-            el = driver.find_element(By.XPATH, xp)
-            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
-            return el
-        except Exception:
-            continue
-    return None
-
-def text_or_inner(el, rel_xpath):
-    """Pega .text do subelemento; se vier vazio, tenta innerText."""
-    try:
-        child = el.find_element(By.XPATH, rel_xpath)
-        t = (child.text or "").strip()
-        if not t:
-            t = (child.get_attribute("innerText") or "").strip()
-        return t or None
-    except Exception:
-        return None
-
-def regex_from_inner_text(el):
-    """Fallback: varre innerText do card e extrai horários/preços por regex."""
-    out = {}
-    try:
-        txt = (el.get_attribute("innerText") or "").strip()
-    except Exception:
-        return out
-    times = re.findall(r'\b\d{2}:\d{2}(?::\d{2})?\b', txt)
-    prices_all = re.findall(r'R\$\s*\d{1,3}(?:\.\d{3})*,\d{2}', txt)
-    if times:
-        out["partida"] = times[0] + (":00" if len(times[0]) == 5 else "")
-        if len(times) > 1:
-            out["chegada"] = times[1] + (":00" if len(times[1]) == 5 else "")
-    if prices_all:
-        out["qualquer_preco"] = prices_all[0]
-    return out
-
-def brl_to_float(s):
-    if not s: return None
-    s1 = re.sub(r"[^\d,\.]", "", s).replace(".", "").replace(",", ".")
-    try: return float(s1)
-    except Exception: return None
-
-def hhmm_to_time(s):
-    if not s: return None
-    m = re.fullmatch(r"(\d{2}):(\d{2})(?::(\d{2}))?", s.strip())
-    if not m: return None
-    hh, mm, ss = m.groups(); ss = ss or "00"
-    try: return dtime(int(hh), int(mm), int(ss))
-    except ValueError: return None
-
-# ============================= Excel =============================
-HEADERS = [
-    "DATA DA BUSCA","HORA DA BUSCA","TRECHO",
-    "DATA PARTIDA","HORA DA PARTIDA","DATA CHEGADA","HORA DA CHEGADA",
-    "TARIFA","TX DE EMBARQUE","TOTAL","CIA DO VOO",
-]
-
-def _is_valid_xlsx(path: str) -> bool:
-    try:
-        if not os.path.isfile(path): return False
-        with ZipFile(path, "r") as zf:
-            return "[Content_Types].xml" in zf.namelist()
-    except Exception:
-        return False
-
-def _create_new_workbook(path: str):
-    wb = Workbook()
-    ws = wb.active
-    ws.title = SHEET_NAME
-    ws.append(HEADERS)
-    widths = {
-        "DATA DA BUSCA": 14, "HORA DA BUSCA": 12, "TRECHO": 12,
-        "DATA PARTIDA": 14, "HORA DA PARTIDA": 14,
-        "DATA CHEGADA": 14, "HORA DA CHEGADA": 14,
-        "TARIFA": 14, "TX DE EMBARQUE": 16, "TOTAL": 14, "CIA DO VOO": 20,
-    }
-    for j, hdr in enumerate(HEADERS, start=1):
-        ws.column_dimensions[get_column_letter(j)].width = widths.get(hdr, 16)
-        ws.cell(row=1, column=j).alignment = CENTER
-    wb.save(path); wb.close()
-
-def ensure_workbook(path: str):
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    if not os.path.exists(path) or not _is_valid_xlsx(path):
-        _create_new_workbook(path); return
-    wb = load_workbook(path)
-    if SHEET_NAME not in wb.sheetnames:
-        ws = wb.create_sheet(SHEET_NAME)
-        ws.append(HEADERS)
-        for j in range(1, len(HEADERS)+1):
-            ws.cell(row=1, column=j).alignment = CENTER
-        wb.save(path)
-    wb.close()
-
-def append_row(path: str, row_values: dict):
-    ensure_workbook(path)
-    wb = load_workbook(path)
-    ws = wb[SHEET_NAME]
-    if ws.max_row == 1 and all((c.value is None for c in ws[1])):
-        ws.append(HEADERS)
-        for j in range(1, len(HEADERS)+1):
-            ws.cell(row=1, column=j).alignment = CENTER
-
-    row = [row_values.get(h) for h in HEADERS]
-    ws.append(row)
-    r = ws.max_row
-
-    fmt = {
-        "DATA DA BUSCA": "DD/MM/YYYY",
-        "HORA DA BUSCA": "HH:MM:SS",
-        "DATA PARTIDA": "DD/MM/YYYY",
-        "HORA DA PARTIDA": "HH:MM:SS",
-        "DATA CHEGADA": "DD/MM/YYYY",
-        "HORA DA CHEGADA": "HH:MM:SS",
-        "TARIFA": "#,##0.00",
-        "TX DE EMBARQUE": "#,##0.00",
-        "TOTAL": "#,##0.00",
-    }
-    for c_idx, hdr in enumerate(HEADERS, start=1):
-        cell = ws.cell(row=r, column=c_idx)
-        if hdr in fmt and cell.value is not None:
-            cell.number_format = fmt[hdr]
-        cell.alignment = CENTER
-
-    wb.save(path); wb.close()
-
-# ============================= Selenium =============================
-def _maybe_set_binary_location(opts: Options):
-    chrome_path = os.getenv("CHROME_PATH") or os.getenv("GOOGLE_CHROME_SHIM")
-    if chrome_path and os.path.exists(chrome_path):
-        opts.binary_location = chrome_path
-
-def setup_driver(headless=True):
-    options = Options()
-    if headless:
-        options.add_argument("--headless=new")
-        options.add_argument("--window-size=1920,1080")
-        options.add_argument("--hide-scrollbars")
-    _maybe_set_binary_location(options)
-    # Flags estáveis no CI
-    options.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
-    options.add_experimental_option("useAutomationExtension", False)
-    options.add_argument("--disable-blink-features=AutomationControlled")
-    options.add_argument("--disable-extensions")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--log-level=3")
-    options.add_argument("--mute-audio")
-    options.add_argument("--no-default-browser-check")
-    options.add_argument("--no-first-run")
-    options.add_argument("--disable-notifications")
-    options.add_argument("--lang=pt-BR")
-    options.add_argument("--use-gl=swiftshader")
-    options.add_argument("--enable-unsafe-swiftshader")
-
-    service = ChromeService()
-    driver = webdriver.Chrome(service=service, options=options)
-    wait = WebDriverWait(driver, 15)
-    return driver, wait
-
-def navigate_same_tab(driver, url):
-    try:
-        driver.execute_script("window.location.assign(arguments[0]);", url)
-    except Exception:
-        driver.get(url)
-
-# ============================= Core de 1 passo =============================
-def processar_trecho_advp(driver, base_tab, out_path, trecho_str, advp, espera):
-    now = datetime.now(TZ)
-    data_voo = (now + timedelta(days=advp)).date()
-    url, _dep = build_url(trecho_str, advp)
-
-    try: driver.switch_to.window(base_tab)
-    except Exception: base_tab = driver.current_window_handle
-    navigate_same_tab(driver, url)
-
-    # ======= BLOCO QUE VOCÊ ENVIOU (dentro da função!) =======
-    # Espera conteúdo real
-    scroll_jiggle(driver)
-    ok = wait_results_ready(driver, max_wait=espera)
-    now = datetime.now(TZ)
-
-    if not ok:
-        row = {
-            "DATA DA BUSCA": now.date(),
-            "HORA DA BUSCA": dtime(now.hour, now.minute, now.second),
-            "TRECHO": trecho_str,
-            "DATA PARTIDA": data_voo,
-            "HORA DA PARTIDA": None,
-            "DATA CHEGADA": data_voo,
-            "HORA DA CHEGADA": None,
-            "TARIFA": None,
-            "TX DE EMBARQUE": None,
-            "TOTAL": None,
-            "CIA DO VOO": "Sem Ofertas",
-        }
-        append_row(out_path, row)
-        return base_tab
-
-    # 1º card visível
-    card = first_visible_card(driver)
-    if card is None:
-        # fallback: usa o main inteiro por regex
-        row = {
-            "DATA DA BUSCA": now.date(),
-            "HORA DA BUSCA": dtime(now.hour, now.minute, now.second),
-            "TRECHO": trecho_str,
-            "DATA PARTIDA": data_voo,
-            "HORA DA PARTIDA": None,
-            "DATA CHEGADA": data_voo,
-            "HORA DA CHEGADA": None,
-            "TARIFA": None,
-            "TX DE EMBARQUE": None,
-            "TOTAL": None,
-            "CIA DO VOO": "Sem Ofertas",
-        }
-        append_row(out_path, row)
-        return base_tab
-
-    # tenta pelos XPaths originais RELATIVOS ao card
-    rel_partida = ".//label/label//div/div/div[1]/span[1]"
-    rel_chegada = ".//label/label//div/div/div[3]/span[1]"
-    rel_tarifa  = ".//ancestor::div[1]/following::div[contains(@class,'price')][1]//span[1]"  # fallback amplo
-    rel_tx_emb  = ".//ancestor::div[1]/following::div//span[contains(.,',')][last()]"
-    rel_total   = ".//ancestor::div[1]/following::div//span[contains(.,'R$')][last()]"
-    rel_cia     = ".//div[contains(@class,'div')]/span | .//div/span"
-
-    # 1ª tentativa: XPaths “oficiais” (relativos ao card)
-    hora_partida_txt = text_or_inner(card, rel_partida)
-    hora_chegada_txt = text_or_inner(card, rel_chegada)
-    tarifa_txt       = text_or_inner(card, rel_tarifa)
-    tx_emb_txt       = text_or_inner(card, rel_tx_emb)
-    total_txt        = text_or_inner(card, rel_total)
-    cia_txt          = text_or_inner(card, rel_cia)
-
-    # Fallback final: regex no innerText do card
-    if not (hora_partida_txt and total_txt and (tarifa_txt or tx_emb_txt)):
-        parsed = regex_from_inner_text(card)
-        hora_partida_txt = hora_partida_txt or parsed.get("partida")
-        hora_chegada_txt = hora_chegada_txt or parsed.get("chegada")
-        if not (tarifa_txt or total_txt):
-            anyp = parsed.get("qualquer_preco")
-            tarifa_txt = tarifa_txt or anyp
-            total_txt  = total_txt  or anyp
-
-    # Normalizações
-    hora_partida = hhmm_to_time(hora_partida_txt)
-    hora_chegada = hhmm_to_time(hora_chegada_txt)
-    tarifa_val   = brl_to_float(tarifa_txt)
-    tx_emb_val   = brl_to_float(tx_emb_txt)
-    total_val    = brl_to_float(total_txt)
-    cia_clean    = (cia_txt or "").strip()
-
-    row = {
-        "DATA DA BUSCA": now.date(),
-        "HORA DA BUSCA": dtime(now.hour, now.minute, now.second),
-        "TRECHO": trecho_str,
-        "DATA PARTIDA": data_voo,
-        "HORA DA PARTIDA": hora_partida,
-        "DATA CHEGADA": data_voo,
-        "HORA DA CHEGADA": hora_chegada,
-        "TARIFA": tarifa_val,
-        "TX DE EMBARQUE": tx_emb_val,
-        "TOTAL": total_val,
-        "CIA DO VOO": cia_clean,
-    }
-    append_row(out_path, row)
-    return base_tab
-    # ======= FIM DO BLOCO =======
-
-# ============================= MAIN =============================
-def main():
-    parser = argparse.ArgumentParser(description="Capo Viagens scraper (GH Actions / Local).")
-    parser.add_argument("--saida",    default="data", help="Pasta para salvar Excel (default: data)")
-    parser.add_argument("--file",     default="", help="Nome do arquivo .xlsx (se vazio, usa timestamp)")
-    parser.add_argument("--espera",   type=int, default=25, help="Segundos p/ esperar render do 1º card")
-    parser.add_argument("--headless", action="store_true", help="Headless")
-    parser.add_argument("--gui",      dest="headless", action="store_false", help="Janela visível (debug)")
-    parser.add_argument("--once",     action="store_true", help="Roda 1 ciclo e finaliza")
-    parser.set_defaults(headless=True)
-    args = parser.parse_args()
-
-    os.makedirs(args.saida, exist_ok=True)
-    # nome do arquivo
-    if args.file:
-        out_path = os.path.join(args.saida, args.file)
+    service = None
+    if chrome_driver_dir:
+        chromedriver_path = str(Path(chrome_driver_dir) / "chromedriver")
+        service = Service(chromedriver_path)
     else:
-        stamp = datetime.now(TZ).strftime("%Y%m%d_%H%M%S")
-        out_path = os.path.join(args.saida, f"CAPOVIAGENS_{stamp}.xlsx")
+        # Fallback: webdriver_manager
+        from webdriver_manager.chrome import ChromeDriverManager
+        service = Service(ChromeDriverManager().install())
 
-    logging.basicConfig(level=logging.INFO,
-                        format="%(asctime)s | %(levelname)s | %(message)s",
-                        datefmt="%H:%M:%S")
-    logging.info("Versão: %s | Planilha: %s | Aba: %s | Headless: %s",
-                 VERSION, out_path, SHEET_NAME, args.headless)
+    if chrome_bin:
+        opts.binary_location = chrome_bin
 
-    ensure_workbook(out_path)
-    driver, _wait = setup_driver(headless=args.headless)
-    base_tab = driver.current_window_handle
+    driver = webdriver.Chrome(service=service, options=opts)
+    wait = WebDriverWait(driver, wait_seconds)
+    return driver, wait
+
+
+# ====================== CONFIG DO SCRAPE ======================
+TRECHOS = [
+    "CGH-SDU", "SDU-CGH",
+]
+INTERVALOS = [60, 90]  # ADVPs
+SITE_BASE = "https://www.capoviagens.com.br/voos/"
+
+# XPaths fornecidos (mantidos):
+XPATH = {
+    "cia":           "//*[@id='__next']/div[4]/div[3]/div/main/div[2]/div/div[1]/div[1]/div[1]/div[1]/label[1]/div[1]/div/span",
+    "hr_ida":        "//*[@id='__next']/div[4]/div[3]/div/main/div[2]/div/div[1]/div[1]/div[1]/div[1]/label[1]/label/div/div/div[1]/span[1]",
+    "hr_volta":      "//*[@id='__next']/div[4]/div[3]/div/main/div[2]/div/div[1]/div[1]/div[1]/div[1]/label[1]/label/div/div/div[3]/span[1]",
+    "por_adulto":    "//*[@id='__next']/div[4]/div[3]/div/main/div[2]/div/div[1]/div[1]/div[2]/div/div[1]/div[2]/div[1]/div/span[1]",
+    "taxa_embarque": "//*[@id='__next']/div[4]/div[3]/div/main/div[2]/div/div[1]/div[1]/div[2]/div/div[1]/div[2]/div[2]/div[4]/span[2]",
+    "taxa_servico":  "//*[@id='__next']/div[4]/div[3]/div/main/div[2]/div/div[1]/div[1]/div[2]/div/div[1]/div[2]/div[2]/div[5]/span[2]",
+    "valor_total":   "//*[@id='__next']/div[4]/div[3]/div/main/div[2]/div/div[1]/div[1]/div[2]/div/div[1]/div[2]/div[2]/div[6]/span",
+    "buy_button":    "//*[@id='btn-buy-now']/button",
+    "flight_num":    "//*[@id='__next']/div[4]/div/div/div[2]/div[2]/div/div[2]/div/div[1]/ul/li[3]/strong",
+}
+
+
+def _capturar(wait: WebDriverWait, xpath: str, cond=EC.visibility_of_element_located) -> str:
+    try:
+        el = wait.until(cond((By.XPATH, xpath)))
+        return el.text.strip()
+    except Exception:
+        return ""
+
+
+def _parse_money(s: str) -> float:
+    """
+    Converte strings tipo 'R$ 1.234,56' -> 1234.56
+    """
+    if not s:
+        return 0.0
+    s2 = re.sub(r"[R$\s.]", "", s).replace(",", ".")
+    try:
+        return float(s2)
+    except Exception:
+        return 0.0
+
+
+def run_once() -> Path:
+    driver, wait = _make_driver(wait_seconds=20)
+
+    results: list[dict] = []
+    now = datetime.now()
+    iter_ts = now.strftime("%Y%m%d_%H%M%S")
+    captura_data = now.strftime("%Y-%m-%d")
+    captura_hora = now.strftime("%H:%M:%S")
 
     try:
-        def ciclo():
-            nonlocal base_tab
-            for trecho in TRECHOS:
-                for advp in ADVP_LIST:
-                    try:
-                        base_tab = processar_trecho_advp(
-                            driver=driver,
-                            base_tab=base_tab,
-                            out_path=out_path,
-                            trecho_str=trecho,
-                            advp=advp,
-                            espera=args.espera
-                        )
-                    except Exception as e:
-                        logging.exception("Falha em %s ADVP %d: %s", trecho, advp, e)
+        for trecho in TRECHOS:
+            orig, dest = trecho.split("-")
+            for dias in INTERVALOS:
+                target_date = datetime.today() + timedelta(days=dias)
+                search_date_str = target_date.strftime("%Y-%m-%d")
 
-        if args.once:
-            ciclo()
-        else:
-            ciclo()  # no CI, geralmente usamos --once; aqui deixo 1 ciclo por padrão
+                tent = 1
+                print(f"[{trecho} | ADVP {dias}] {captura_hora} — iniciando…")
+                while tent <= 3:
+                    url = (
+                        f"{SITE_BASE}"
+                        f"?fromAirport={orig}&toAirport={dest}"
+                        f"&departureDate={search_date_str}"
+                        f"&adult=1&child=0&cabin=Basic&isTwoWays=false"
+                    )
+                    driver.get(url)
 
+                    cia           = _capturar(wait, XPATH["cia"])
+                    hr_ida        = _capturar(wait, XPATH["hr_ida"])
+                    hr_volta      = _capturar(wait, XPATH["hr_volta"])
+                    por_adulto    = _capturar(wait, XPATH["por_adulto"])
+                    taxa_embarque = _capturar(wait, XPATH["taxa_embarque"])
+                    taxa_servico  = _capturar(wait, XPATH["taxa_servico"])
+                    valor_total   = _capturar(wait, XPATH["valor_total"])
+
+                    if cia or valor_total:
+                        break  # conseguiu dados
+                    tent += 1
+                    print("  Sem dados visíveis. Nova tentativa em 5s…")
+                    time.sleep(5)
+
+                # Número do voo (opcional)
+                num_voo = ""
+                try:
+                    btn = wait.until(EC.element_to_be_clickable((By.XPATH, XPATH["buy_button"])))
+                    btn.click()
+                    time.sleep(2)
+                    num_voo = _capturar(wait, XPATH["flight_num"], cond=EC.presence_of_element_located)
+                except Exception:
+                    pass
+
+                print(f"  -> cia={cia} ida={hr_ida} volta={hr_volta} total={valor_total} voo={num_voo}")
+
+                results.append({
+                    "captura_data": captura_data,
+                    "captura_hora": captura_hora,
+                    "trecho": trecho,
+                    "antecedencia": dias,
+                    "data_voo": search_date_str,
+                    "cia": cia,
+                    "hr_ida": hr_ida,
+                    "hr_volta": hr_volta,
+                    "por_adulto": por_adulto,
+                    "taxa_embarque": taxa_embarque,
+                    "taxa_servico": taxa_servico,
+                    "valor_total": valor_total,
+                    "numero_voo": num_voo,
+                })
     finally:
-        try: driver.quit()
-        except Exception: pass
-        logging.info("Finalizado.")
+        driver.quit()
 
-# ============================= Driver/setup =============================
-def setup_driver(headless=True):
-    options = Options()
-    if headless:
-        options.add_argument("--headless=new")
-        options.add_argument("--window-size=1920,1080")
-        options.add_argument("--hide-scrollbars")
-    _maybe_set_binary_location(options)
-    options.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
-    options.add_experimental_option("useAutomationExtension", False)
-    options.add_argument("--disable-blink-features=AutomationControlled")
-    options.add_argument("--disable-extensions")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--log-level=3")
-    options.add_argument("--mute-audio")
-    options.add_argument("--no-default-browser-check")
-    options.add_argument("--no-first-run")
-    options.add_argument("--disable-notifications")
-    options.add_argument("--lang=pt-BR")
-    options.add_argument("--use-gl=swiftshader")
-    options.add_argument("--enable-unsafe-swiftshader")
-    service = ChromeService()
-    driver = webdriver.Chrome(service=service, options=options)
-    wait = WebDriverWait(driver, 15)
-    return driver, wait
+    df = pd.DataFrame(results)
+
+    # Ordena colunas
+    base_cols = ["captura_data", "captura_hora", "trecho", "antecedencia", "data_voo"]
+    rest = [c for c in df.columns if c not in base_cols]
+    df = df[base_cols + rest]
+
+    # Converte monetários
+    for col in ["por_adulto", "taxa_embarque", "taxa_servico", "valor_total"]:
+        df[col] = df[col].apply(_parse_money)
+
+    # Garante pasta data/
+    root = Path(__file__).resolve().parent
+    data_dir = root / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+
+    out_path = data_dir / f"CAPOVIAGENS_{iter_ts}.xlsx"
+    with pd.ExcelWriter(out_path, engine="openpyxl") as wr:
+        df.to_excel(wr, index=False)
+
+    print(f"OK: arquivo gerado em {out_path}")
+    return out_path
+
 
 if __name__ == "__main__":
-    main()
-
+    run_once()
