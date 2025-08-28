@@ -2,7 +2,7 @@ name: scrape-capoviagens
 
 on:
   schedule:
-    - cron: "*/30 * * * *"   # a cada 30 minutos
+    - cron: "*/30 * * * *"
   workflow_dispatch:
 
 jobs:
@@ -19,12 +19,21 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Show repo tree (debug)
+        run: |
+          pwd
+          ls -la
+          echo "----"
+          ls -la data || true
+          echo "----"
+          ls -R | head -n 500
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Setup Chrome (com Chromedriver)
+      - name: Setup Chrome (with Chromedriver)
         uses: browser-actions/setup-chrome@v2
         with:
           install-chromedriver: true
@@ -38,9 +47,35 @@ jobs:
             pip install selenium webdriver-manager pandas openpyxl
           fi
 
+      # Detecta o script em nomes/pastas comuns
+      - name: Detect scraper path
+        id: detect
+        run: |
+          set -e
+          CANDIDATES="
+          capoviagens_scraper.py
+          scripts/capoviagens_scraper.py
+          capoviagens_scraper_gha.py
+          scripts/capoviagens_scraper_gha.py
+          "
+          FOUND=""
+          for f in $CANDIDATES; do
+            if [ -f "$f" ]; then
+              FOUND="$f"
+              break
+            fi
+          done
+          if [ -z "$FOUND" ]; then
+            echo "❌ Script não encontrado. Coloque-o na raiz como capoviagens_scraper.py ou ajuste o caminho aqui." >&2
+            exit 1
+          fi
+          echo "SCRIPT_PATH=$FOUND" >> $GITHUB_ENV
+          echo "Usando script: $FOUND"
+
       - name: Run scraper
         run: |
-          python capoviagens_scraper.py
+          mkdir -p data
+          python "$SCRIPT_PATH"
 
       - name: Commit & push data (se houver mudanças)
         run: |
