@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Capo Viagens — Scraper para GitHub Actions (parametrizado)
-- Headless (Chrome) p/ Actions
-- 1 execução por run (sem loop infinito)
-- Salva em data/CAPOVIAGENS_YYYYMMDD_HHMMSS.xlsx
+Capo Viagens — Scraper para GitHub Actions (Parquet + grupos)
+- Gera PARQUET incremental (timestamp) e um PARQUET fixo por grupo (overwrite)
+- Opcional: também salva XLSX se WRITE_XLSX=1
+- Pastas/nomes:
+  - data/CAPOVIAGENS_YYYYMMDD_HHMMSS.parquet   (sempre)
+  - data/CAPO_<GROUP_NAME>.parquet             (se GROUP_NAME definido)
+  - data/CAPOVIAGENS_YYYYMMDD_HHMMSS.xlsx      (se WRITE_XLSX=1)
 
-Parâmetros (opcionais):
-- TRECHOS_CSV="CGH-SDU,SDU-CGH,..."     -> sobrescreve TRECHOS padrão
-- ADVPS_CSV="1,5,11,17,30"              -> sobrescreve ADVP_LIST padrão
-- SLICE_IDX=0 TOTAL_SLICES=1            -> fatiamento opcional (matrix/rodízio)
+Parâmetros (env ou CLI):
+- TRECHOS_CSV="CGH-SDU,SDU-CGH,..."      -> sobrescreve TRECHOS padrão
+- ADVPS_CSV="1,5,11,17,30"               -> sobrescreve ADVP_LIST padrão
+- GROUP_NAME="G1"                        -> nome do grupo para arquivo fixo
+- SLICE_IDX=0 TOTAL_SLICES=1             -> fatiamento opcional (matrix/rodízio)
 """
 
 import os
@@ -29,7 +33,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
 # ====================== LISTAS PADRÃO ======================
-# Por padrão já usa os ADVPs solicitados (pode sobrescrever via ADVPS_CSV)
+# ADVP padrão já no conjunto solicitado
 ADVP_LIST = [1, 5, 11, 17, 30]
 TRECHOS = [
     ("CGH", "SDU"), ("SDU", "CGH"),
@@ -47,10 +51,12 @@ TRECHOS = [
 
 def _parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument("--trechos", type=str, default=os.getenv("TRECHOS_CSV", ""))  # "A-B,C-D"
-    p.add_argument("--advps",   type=str, default=os.getenv("ADVPS_CSV", ""))    # "1,5,11,17,30"
+    p.add_argument("--trechos", type=str, default=os.getenv("TRECHOS_CSV", ""))   # "A-B,C-D"
+    p.add_argument("--advps",   type=str, default=os.getenv("ADVPS_CSV", ""))     # "1,5,11,17,30"
     p.add_argument("--slice-idx", type=int, default=int(os.getenv("SLICE_IDX", "0")))
     p.add_argument("--total-slices", type=int, default=int(os.getenv("TOTAL_SLICES", "1")))
+    p.add_argument("--group-name", type=str, default=os.getenv("GROUP_NAME", "")) # "G1"
+    p.add_argument("--write-xlsx", type=int, default=int(os.getenv("WRITE_XLSX", "0")))
     return p.parse_args()
 
 def _resolve_lists(args):
@@ -63,13 +69,11 @@ def _resolve_lists(args):
             if tok:
                 a, b = tok.split("-")
                 trechos.append((a.strip().upper(), b.strip().upper()))
-
     # ADVP
     advps = ADVP_LIST
     raw_a = (args.advps or "").strip()
     if raw_a:
         advps = [int(x) for x in re.split(r"[;,]\s*", raw_a) if x]
-
     return trechos, advps
 
 def _make_driver(wait_seconds: int = 20) -> tuple[webdriver.Chrome, WebDriverWait]:
@@ -91,8 +95,7 @@ def _make_driver(wait_seconds: int = 20) -> tuple[webdriver.Chrome, WebDriverWai
             from webdriver_manager.chrome import ChromeDriverManager
             service = Service(ChromeDriverManager().install())
         except Exception:
-            # fallback simples (caso já exista no PATH)
-            service = Service()
+            service = Service()  # fallback (driver no PATH)
 
     if chrome_bin:
         opts.binary_location = chrome_bin
@@ -153,11 +156,12 @@ def run_once(args=None) -> Path:
     iter_ts = now.strftime("%Y%m%d_%H%M%S")
     captura_data = now.strftime("%Y-%m-%d")
     captura_hora = now.strftime("%H:%M:%S")
+    captura_ts   = pd.Timestamp.now(tz="America/Sao_Paulo").tz_localize(None)
 
     try:
         for (orig, dest), dias in selected:
             trecho_str = f"{orig}-{dest}"
-            target_date = datetime.today() + timedelta(days=dias)
+            target_date = datetime.now() + timedelta(days=dias)
             search_date_str = target_date.strftime("%Y-%m-%d")
 
             tent = 1
@@ -198,8 +202,10 @@ def run_once(args=None) -> Path:
             print(f"  -> cia={cia} ida={hr_ida} volta={hr_volta} total={valor_total} voo={num_voo}")
 
             results.append({
-                "captura_data": captura_data,
-                "captura_hora": captura_hora,
+                "captura_data": captura_data,      # string ISO (YYYY-MM-DD)
+                "captura_hora": captura_hora,      # string HH:MM:SS
+                "captura_ts":   captura_ts,        # timestamp para ordenação no app
+                "grupo":        (args.group_name or ""),  # nome do grupo (se houver)
                 "trecho": trecho_str,
                 "antecedencia": dias,
                 "data_voo": search_date_str,
@@ -217,23 +223,43 @@ def run_once(args=None) -> Path:
 
     df = pd.DataFrame(results)
 
-    base_cols = ["captura_data", "captura_hora", "trecho", "antecedencia", "data_voo"]
+    # Ordena e padroniza campos numéricos
+    base_cols = ["captura_data", "captura_hora", "captura_ts", "grupo", "trecho", "antecedencia", "data_voo"]
     rest = [c for c in df.columns if c not in base_cols]
     df = df[base_cols + rest]
 
     for col in ["por_adulto", "taxa_embarque", "taxa_servico", "valor_total"]:
-        df[col] = df[col].apply(_parse_money)
+        df[col] = df[col].apply(_parse_money).astype("float64")
 
+    # Persistência
     root = Path(__file__).resolve().parent
     data_dir = root / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
 
-    out_path = data_dir / f"CAPOVIAGENS_{iter_ts}.xlsx"
-    with pd.ExcelWriter(out_path, engine="openpyxl") as wr:
-        df.to_excel(wr, index=False)
+    # 1) arquivo incremental com timestamp
+    ts_name = f"CAPOVIAGENS_{iter_ts}.parquet"
+    out_parquet = data_dir / ts_name
+    df.to_parquet(out_parquet, index=False, engine="pyarrow")
+    print(f"OK: PARQUET gerado em {out_parquet}")
 
-    print(f"OK: arquivo gerado em {out_path}")
-    return out_path
+    # 2) arquivo fixo por grupo (overwrite) — facilita leitura fracionada no app
+    if args.group_name:
+        fixed_parquet = data_dir / f"CAPO_{args.group_name}.parquet"
+        df.to_parquet(fixed_parquet, index=False, engine="pyarrow")
+        print(f"OK: PARQUET por grupo atualizado em {fixed_parquet}")
+
+    # 3) opcional: XLSX, se precisar compatibilidade
+    if args.write_xlsx == 1:
+        try:
+            import openpyxl  # garante engine
+            xlsx_path = data_dir / f"CAPOVIAGENS_{iter_ts}.xlsx"
+            with pd.ExcelWriter(xlsx_path, engine="openpyxl") as wr:
+                df.to_excel(wr, index=False)
+            print(f"OK: XLSX gerado em {xlsx_path}")
+        except Exception as e:
+            print(f"[WARN] Falha ao gerar XLSX: {e}")
+
+    return out_parquet
 
 if __name__ == "__main__":
     run_once()
