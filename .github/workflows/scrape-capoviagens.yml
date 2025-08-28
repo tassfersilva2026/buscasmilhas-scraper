@@ -1,9 +1,9 @@
 name: scrape-capoviagens
 
 on:
-  workflow_dispatch:
   schedule:
-    - cron: "*/30 * * * *"
+    - cron: "*/30 * * * *"   # a cada 30 minutos
+  workflow_dispatch:
 
 jobs:
   run:
@@ -12,10 +12,6 @@ jobs:
       contents: write
     env:
       TZ: America/Sao_Paulo
-      HEADLESS: "1"   # seu script detecta, mas deixo explícito
-    concurrency:
-      group: scrape-capo-commit
-      cancel-in-progress: false
 
     steps:
       - name: Checkout
@@ -27,11 +23,8 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-          cache: "pip"
 
-      # Chrome + Chromedriver compatíveis (1 passo)
-      - name: Setup Chrome
-        id: chrome
+      - name: Setup Chrome (com Chromedriver)
         uses: browser-actions/setup-chrome@v2
         with:
           install-chromedriver: true
@@ -39,35 +32,24 @@ jobs:
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
-          pip install selenium pandas openpyxl
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            pip install selenium webdriver-manager pandas openpyxl
+          fi
 
-      - name: Ensure data folder
-        run: mkdir -p data
-
-      - name: Set FILE env
-        run: echo "FILE=CAPOVIAGENS_$(date +'%Y%m%d_%H%M%S').xlsx" >> $GITHUB_ENV
-
-      - name: Run scraper (headless)
-        env:
-          CHROME_PATH: ${{ steps.chrome.outputs.chrome-path }}
-          CHROMEDRIVER_PATH: ${{ steps.chrome.outputs.chromedriver-path }}
+      - name: Run scraper
         run: |
-          python capoviagens_scraper_gha.py
-          ls -lh data || true
+          python capoviagens_scraper.py
 
-      # Opcional: guarda o arquivo também como artifact do run
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ env.FILE }}
-          path: data/${{ env.FILE }}
-          if-no-files-found: warn
-
-      - name: Commit results
+      - name: Commit & push data (se houver mudanças)
         run: |
-          git config user.name  "github-actions[bot]"
+          git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add data/*.xlsx || true
-          git commit -m "CAPO: add $FILE" || echo "Nada pra commitar"
-          git pull --rebase
-          git push
+          if ! git diff --cached --quiet; then
+            git commit -m "data: CAPOVIAGENS scrape $(date -u +'%Y-%m-%d %H:%M:%S') [skip ci]"
+            git push
+          else
+            echo "Sem mudanças para commitar."
+          fi
