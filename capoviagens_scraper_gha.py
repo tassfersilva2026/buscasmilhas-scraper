@@ -17,7 +17,7 @@ ENV/CLI:
   PAGELOAD_TIMEOUT=30                  | --pageload-timeout
   SLICE_IDX / TOTAL_SLICES             | --slice-idx / --total-slices
 
-Dependências mínimas: selenium, pandas, xlwt, pyarrow (não usado aqui), webdriver-manager (opcional)
+Dependências mínimas: selenium, pandas, xlwt, webdriver-manager (opcional)
 """
 
 import os
@@ -59,7 +59,7 @@ def _parse_args():
     p.add_argument("--advps",   type=str, default=os.getenv("ADVPS_CSV", ""))       # "1,5,11,17,30"
     p.add_argument("--group-name", type=str, default=os.getenv("GROUP_NAME", ""))   # "G1"
     p.add_argument("--wait-seconds", type=int, default=int(os.getenv("WAIT_SECONDS", "12")))
-    p.add_argument("--attempts", type[int], default=int(os.getenv("MAX_ATTEMPTS", "2")))
+    p.add_argument("--attempts", type=int, default=int(os.getenv("MAX_ATTEMPTS", "2")))        # <-- fix aqui
     p.add_argument("--sleep-retry", type=int, default=int(os.getenv("SLEEP_RETRY", "4")))
     p.add_argument("--pageload-timeout", type=int, default=int(os.getenv("PAGELOAD_TIMEOUT", "30")))
     p.add_argument("--slice-idx", type=int, default=int(os.getenv("SLICE_IDX", "0")))
