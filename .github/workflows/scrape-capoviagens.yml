@@ -2,7 +2,7 @@ name: scrape-capo-5partes-xls
 
 on:
   schedule:
-    - cron: "*/30 * * * *"   # ajuste se quiser mais frequência
+    - cron: "*/30 * * * *"   # ajuste a frequência como preferir
   workflow_dispatch:
 
 jobs:
@@ -47,23 +47,22 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-          pip install xlwt
+          pip install selenium pandas xlwt webdriver-manager
 
       - name: Run ${{ matrix.grupo.nome }}
         env:
           TRECHOS_CSV: ${{ matrix.grupo.trechos }}
           ADVPS_CSV: "1,5,11,17,30"
           GROUP_NAME: ${{ matrix.grupo.nome }}
-          # Ajustes finos de robustez/velocidade (logs já detalhados no script)
           WAIT_SECONDS: "12"
           MAX_ATTEMPTS: "2"
           SLEEP_RETRY: "4"
           PAGELOAD_TIMEOUT: "30"
-          # Caminho do script; se não estiver na raiz, encontramos automaticamente:
           SCRIPT_PATH: "capoviagens_scraper_gha.py"
         shell: bash
         run: |
           set -e
+          # encontra o script se não estiver na raiz
           if [ ! -f "$SCRIPT_PATH" ]; then
             echo "Script não está na raiz. Procurando..."
             FOUND=$(find . -maxdepth 3 -type f -name "capoviagens_scraper_gha.py" | head -n1 || true)
