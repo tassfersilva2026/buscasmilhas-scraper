@@ -2,7 +2,7 @@ name: scrape-capo-5partes-xls
 
 on:
   schedule:
-    - cron: "*/30 * * * *"
+    - cron: "*/10 * * * *"   # agora roda a cada 10 minutos (UTC)
   workflow_dispatch:
 
 jobs:
