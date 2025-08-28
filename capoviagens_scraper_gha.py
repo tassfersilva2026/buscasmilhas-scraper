@@ -2,11 +2,9 @@
 # -*- coding: utf-8 -*-
 """
 Capo Viagens — Scraper para GitHub Actions
-- Headless (Chrome) e robusto p/ Actions
-- 1 iteração por execução (sem loop infinito)
-- Salva saída em data/CAPOVIAGENS_YYYYMMDD_HHMMSS.xlsx
-
-Depêndencias: ver requirements.txt
+- Headless (Chrome) p/ Actions
+- 1 execução por run (sem loop infinito)
+- Salva em data/CAPOVIAGENS_YYYYMMDD_HHMMSS.xlsx
 """
 
 import os
@@ -24,38 +22,7 @@ from selenium.webdriver.chrome.options import Options as ChromeOptions
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
-# fallback inteligente: usa chromedriver do setup-chrome se existir; senão, webdriver_manager
-def _make_driver(wait_seconds: int = 20) -> tuple[webdriver.Chrome, WebDriverWait]:
-    opts = ChromeOptions()
-    opts.add_argument("--headless=new")
-    opts.add_argument("--no-sandbox")
-    opts.add_argument("--disable-dev-shm-usage")
-    opts.add_argument("--window-size=1920,1080")
-    opts.add_argument("--disable-gpu")
-    opts.add_argument("--start-maximized")
-
-    # Usa binários do action 'browser-actions/setup-chrome@v2' se presentes:
-    chrome_bin = os.environ.get("GOOGLE_CHROME_SHIM") or os.environ.get("CHROME_BIN")
-    chrome_driver_dir = os.environ.get("CHROMEWEBDRIVER")
-
-    service = None
-    if chrome_driver_dir:
-        chromedriver_path = str(Path(chrome_driver_dir) / "chromedriver")
-        service = Service(chromedriver_path)
-    else:
-        # Fallback: webdriver_manager
-        from webdriver_manager.chrome import ChromeDriverManager
-        service = Service(ChromeDriverManager().install())
-
-    if chrome_bin:
-        opts.binary_location = chrome_bin
-
-    driver = webdriver.Chrome(service=service, options=opts)
-    wait = WebDriverWait(driver, wait_seconds)
-    return driver, wait
-
-
-# ====================== CONFIG DO SCRAPE ======================
+# ====================== LISTAS SOLICITADAS ======================
 ADVP_LIST = [1, 3, 7, 14, 21, 30, 60, 90]
 TRECHOS = [
     ("CGH", "SDU"), ("SDU", "CGH"),
@@ -69,9 +36,35 @@ TRECHOS = [
     ("GIG", "SSA"), ("SSA", "GIG"),
     ("BSB", "SDU"), ("SDU", "BSB"),
 ]
-SITE_BASE = "https://www.capoviagens.com.br/voos/"
+# ===============================================================
 
-# XPaths fornecidos (mantidos):
+def _make_driver(wait_seconds: int = 20) -> tuple[webdriver.Chrome, WebDriverWait]:
+    opts = ChromeOptions()
+    opts.add_argument("--headless=new")
+    opts.add_argument("--no-sandbox")
+    opts.add_argument("--disable-dev-shm-usage")
+    opts.add_argument("--window-size=1920,1080")
+    opts.add_argument("--disable-gpu")
+    opts.add_argument("--start-maximized")
+
+    chrome_bin = os.environ.get("GOOGLE_CHROME_SHIM") or os.environ.get("CHROME_BIN")
+    chrome_driver_dir = os.environ.get("CHROMEWEBDRIVER")
+
+    if chrome_driver_dir:
+        service = Service(str(Path(chrome_driver_dir) / "chromedriver"))
+    else:
+        from webdriver_manager.chrome import ChromeDriverManager
+        service = Service(ChromeDriverManager().install())
+
+    if chrome_bin:
+        opts.binary_location = chrome_bin
+
+    driver = webdriver.Chrome(service=service, options=opts)
+    wait = WebDriverWait(driver, wait_seconds)
+    return driver, wait
+
+
+# XPaths (mantidos)
 XPATH = {
     "cia":           "//*[@id='__next']/div[4]/div[3]/div/main/div[2]/div/div[1]/div[1]/div[1]/div[1]/label[1]/div[1]/div/span",
     "hr_ida":        "//*[@id='__next']/div[4]/div[3]/div/main/div[2]/div/div[1]/div[1]/div[1]/div[1]/label[1]/label/div/div/div[1]/span[1]",
@@ -84,7 +77,6 @@ XPATH = {
     "flight_num":    "//*[@id='__next']/div[4]/div/div/div[2]/div[2]/div/div[2]/div/div[1]/ul/li[3]/strong",
 }
 
-
 def _capturar(wait: WebDriverWait, xpath: str, cond=EC.visibility_of_element_located) -> str:
     try:
         el = wait.until(cond((By.XPATH, xpath)))
@@ -92,11 +84,7 @@ def _capturar(wait: WebDriverWait, xpath: str, cond=EC.visibility_of_element_loc
     except Exception:
         return ""
 
-
 def _parse_money(s: str) -> float:
-    """
-    Converte strings tipo 'R$ 1.234,56' -> 1234.56
-    """
     if not s:
         return 0.0
     s2 = re.sub(r"[R$\s.]", "", s).replace(",", ".")
@@ -104,7 +92,6 @@ def _parse_money(s: str) -> float:
         return float(s2)
     except Exception:
         return 0.0
-
 
 def run_once() -> Path:
     driver, wait = _make_driver(wait_seconds=20)
@@ -116,17 +103,17 @@ def run_once() -> Path:
     captura_hora = now.strftime("%H:%M:%S")
 
     try:
-        for trecho in TRECHOS:
-            orig, dest = trecho.split("-")
-            for dias in INTERVALOS:
+        for orig, dest in TRECHOS:
+            trecho_str = f"{orig}-{dest}"
+            for dias in ADVP_LIST:
                 target_date = datetime.today() + timedelta(days=dias)
                 search_date_str = target_date.strftime("%Y-%m-%d")
 
                 tent = 1
-                print(f"[{trecho} | ADVP {dias}] {captura_hora} — iniciando…")
+                print(f"[{trecho_str} | ADVP {dias}] {captura_hora} — iniciando…")
                 while tent <= 3:
                     url = (
-                        f"{SITE_BASE}"
+                        f"https://www.capoviagens.com.br/voos/"
                         f"?fromAirport={orig}&toAirport={dest}"
                         f"&departureDate={search_date_str}"
                         f"&adult=1&child=0&cabin=Basic&isTwoWays=false"
@@ -142,7 +129,7 @@ def run_once() -> Path:
                     valor_total   = _capturar(wait, XPATH["valor_total"])
 
                     if cia or valor_total:
-                        break  # conseguiu dados
+                        break
                     tent += 1
                     print("  Sem dados visíveis. Nova tentativa em 5s…")
                     time.sleep(5)
@@ -162,7 +149,7 @@ def run_once() -> Path:
                 results.append({
                     "captura_data": captura_data,
                     "captura_hora": captura_hora,
-                    "trecho": trecho,
+                    "trecho": trecho_str,
                     "antecedencia": dias,
                     "data_voo": search_date_str,
                     "cia": cia,
@@ -179,16 +166,13 @@ def run_once() -> Path:
 
     df = pd.DataFrame(results)
 
-    # Ordena colunas
     base_cols = ["captura_data", "captura_hora", "trecho", "antecedencia", "data_voo"]
     rest = [c for c in df.columns if c not in base_cols]
     df = df[base_cols + rest]
 
-    # Converte monetários
     for col in ["por_adulto", "taxa_embarque", "taxa_servico", "valor_total"]:
         df[col] = df[col].apply(_parse_money)
 
-    # Garante pasta data/
     root = Path(__file__).resolve().parent
     data_dir = root / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -203,4 +187,3 @@ def run_once() -> Path:
 
 if __name__ == "__main__":
     run_once()
-
