@@ -48,17 +48,17 @@ def find_data_dir(start: Path) -> str:
         cur = cur.parent
     return (start.parent / "data").as_posix()
 
+# __file__ existe no Streamlit; se rodar como "Home.py", também.
 DATA_DIR_DEFAULT = find_data_dir(Path(__file__).resolve())
 
 # ==========================
 # Leitura e normalização
 # ==========================
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, ttl=120)
 def _list_files(data_dir: str, patterns: List[str] | None = None) -> List[Path]:
     p = Path(data_dir)
     if not p.exists():
         return []
-    # Mantém geral + garante match aos prefixos comuns
     pats = patterns or [
         "*.xlsx", "*.xls", "*.csv", "*.parquet",
         "FLIPMILHAS_*.*", "CAPOVIAGENS_*.*", "MAXMILHAS_*.*", "123MILHAS_*.*"
@@ -87,7 +87,6 @@ def _to_float_series(s: pd.Series) -> pd.Series:
 
 def detect_empresa_from_filename(name: str) -> str:
     u = name.upper()
-    # Prioriza prefixos exatamente como você descreveu
     if re.match(r"^CAPOVIAGENS_", u, flags=re.I):
         return "CAPO VIAGENS"
     if re.match(r"^FLIPMILHAS_", u, flags=re.I):
@@ -96,7 +95,6 @@ def detect_empresa_from_filename(name: str) -> str:
         return "MAXMILHAS"
     if re.match(r"^123MILHAS_", u, flags=re.I):
         return "123MILHAS"
-    # Fallbacks (caso venham nomes diferentes)
     if "FLIP" in u or "FLIPMILHAS" in u:
         return "FLIPMILHAS"
     if "CAPO" in u or "CAPOVIAGENS" in u:
@@ -107,10 +105,12 @@ def detect_empresa_from_filename(name: str) -> str:
         return "123MILHAS"
     return "N/A"
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, ttl=120)
 def _read_one(path: str, mtime: float) -> pd.DataFrame:
     p = Path(path); ext = p.suffix.lower()
+    # === leitura por extensão ===
     if ext in (".xlsx", ".xls"):
+        # .xlsx usa openpyxl, .xls usa xlrd
         df = pd.read_excel(p)
     elif ext == ".csv":
         for sep in [";", ","]:
@@ -126,11 +126,10 @@ def _read_one(path: str, mtime: float) -> pd.DataFrame:
     else:
         return pd.DataFrame()
 
-    # Normaliza nomes das colunas
+    # === normalização de colunas ===
     colmap = {c: re.sub(r"\s+", " ", str(c)).strip().upper() for c in df.columns}
     df = df.rename(columns=colmap)
 
-    # Alias de colunas comuns
     ren = {
         "CIA": "CIA DO VOO",
         "CIA DO VÔO": "CIA DO VOO",
@@ -180,7 +179,7 @@ def _read_one(path: str, mtime: float) -> pd.DataFrame:
     other = [c for c in df.columns if c not in base]
     return df[base + other]
 
-@st.cache_data(show_spinner=True)
+@st.cache_data(show_spinner=True, ttl=120)
 def load_all(data_dir: str) -> pd.DataFrame:
     files = _list_files(data_dir)
     if not files:
@@ -227,12 +226,21 @@ def dynamic_limit(series: pd.Series, hard_cap: Optional[int]) -> int:
     return max(y, 100)
 
 # ======================================================
-# FILTROS NO TOPO
+# Sidebar: pasta de dados
+# ======================================================
+st.sidebar.subheader("Fonte de dados")
+data_dir_input = st.sidebar.text_input("Pasta data", value=DATA_DIR_DEFAULT, help="Caminho da pasta com os arquivos (.xls/.xlsx/.csv/.parquet)")
+st.sidebar.caption(f"Detectado: `{DATA_DIR_DEFAULT}`")
+st.sidebar.markdown("---")
+
+# ======================================================
+# Carregamento dos dados
 # ======================================================
 with st.spinner("Lendo planilhas da pasta data/…"):
-    df_all = load_all(DATA_DIR_DEFAULT)
+    df_all = load_all(data_dir_input.strip() or DATA_DIR_DEFAULT)
+
 if df_all.empty:
-    st.info("Nenhum arquivo lido. Verifique a pasta data/.")
+    st.error("Nenhum arquivo lido. Verifique a pasta **data/** (ou ajuste na sidebar).")
     st.stop()
 
 min_d = df_all["BUSCA_DATETIME"].dropna().min()
@@ -282,13 +290,21 @@ st.markdown("---")
 # ======================================================
 # Helpers de gráfico
 # ======================================================
-def x_axis(enc: str, title: Optional[str]=None):
-    return alt.X(enc, axis=alt.Axis(title=title, labelAngle=0, labelOverlap=True,
-                                    labelFontWeight="bold", labelColor=CINZA_TXT))
+def x_axis(field_and_type: str, title: Optional[str]=None, sort=None):
+    # sort é passado aqui corretamente (sem .sort() encadeado)
+    return alt.X(
+        field_and_type,
+        sort=sort if sort is not None else alt.Undefined,
+        axis=alt.Axis(title=title, labelAngle=0, labelOverlap=True,
+                      labelFontWeight="bold", labelColor=CINZA_TXT),
+    )
+
 def y_axis(enc: str, title: str="PREÇO", domain=None):
-    return alt.Y(enc, axis=alt.Axis(title=title, format=".0f",
-                                    labelFontWeight="bold", labelColor=CINZA_TXT),
-                 scale=alt.Scale(domain=domain) if domain is not None else alt.Undefined)
+    return alt.Y(
+        enc,
+        axis=alt.Axis(title=title, format=".0f", labelFontWeight="bold", labelColor=CINZA_TXT),
+        scale=alt.Scale(domain=domain) if domain is not None else alt.Undefined
+    )
 
 def barras_com_tendencia(df: pd.DataFrame, x_col: str, y_col: str, x_type: str,
                          titulo: str, *, x_title: Optional[str]=None,
@@ -296,16 +312,14 @@ def barras_com_tendencia(df: pd.DataFrame, x_col: str, y_col: str, x_type: str,
     df = df.copy(); df["_LABEL"] = df[y_col].apply(fmt_pontos)
 
     base = alt.Chart(df).encode(
-        x=(x_axis(f"{x_col}:{x_type}", title=x_title).sort(sort)
-           if sort is not None else x_axis(f"{x_col}:{x_type}", title=x_title)),
+        x=x_axis(f"{x_col}:{x_type}", title=x_title, sort=sort),
         y=y_axis(f"{y_col}:Q", domain=[0, y_max] if y_max else None),
         tooltip=[x_col, alt.Tooltip(y_col, format=",.0f")],
     )
     bars = base.mark_bar(color=AMARELO)
 
     labels = alt.Chart(df).encode(
-        x=(x_axis(f"{x_col}:{x_type}", title=x_title).sort(sort)
-           if sort is not None else x_axis(f"{x_col}:{x_type}", title=x_title)),
+        x=x_axis(f"{x_col}:{x_type}", title=x_title, sort=sort),
         y=y_axis(f"{y_col}:Q", domain=[0, y_max] if y_max else None),
         text=alt.Text("_LABEL:N"),
     ).mark_text(
@@ -316,7 +330,7 @@ def barras_com_tendencia(df: pd.DataFrame, x_col: str, y_col: str, x_type: str,
     line = (
         alt.Chart(df)
         .mark_line(color=CINZA_TXT, opacity=0.95, strokeDash=[6,4])
-        .encode(x=x_axis(f"{x_col}:{x_type}", title=x_title),
+        .encode(x=x_axis(f"{x_col}:{x_type}", title=x_title, sort=sort),
                 y=y_axis(f"{y_col}:Q", domain=[0, y_max] if y_max else None))
     )
 
@@ -409,7 +423,7 @@ def _row_heat_css(row: pd.Series, price_cols: List[str]) -> pd.Series:
     vmin = np.nanmin(vals); vmax = np.nanmax(vals); rng = max(vmax - vmin, 1e-9)
     def interp(v):
         c0=(255,247,224); c1=(242,201,76); t=(v - vmin)/rng
-        r=int(c0[0]+t*(c1[0]-c1[0] if False else c1[0]-c0[0])); g=int(c0[1]+t*(c1[1]-c0[1])); b=int(c0[2]+t*(c1[2]-c0[2]))
+        r=int(c0[0]+t*(c1[0]-c0[0])); g=int(c0[1]+t*(c1[1]-c0[1])); b=int(c0[2]+t*(c1[2]-c0[2]))
         return f"background-color: rgb({r},{g},{b});"
     for c in price_cols:
         v=row[c]
@@ -520,7 +534,6 @@ abas = st.tabs(["FLIPMILHAS","CAPO VIAGENS","MAXMILHAS","123MILHAS"])
 with abas[0]:
     render_empresa(view_all[view_all["EMPRESA"] == "FLIPMILHAS"].copy(), "FLIPMILHAS")
 with abas[1]:
-    # CAPO: mesma estrutura do FLIPMILHAS, lendo arquivos CAPOVIAGENS_* na pasta data/
     render_empresa(view_all[view_all["EMPRESA"] == "CAPO VIAGENS"].copy(), "CAPO")
 with abas[2]:
     render_empresa(view_all[view_all["EMPRESA"] == "MAXMILHAS"].copy(), "MAX")
