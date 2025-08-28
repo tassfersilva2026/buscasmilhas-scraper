@@ -15,12 +15,11 @@ import altair as alt
 st.set_page_config(page_title="Painel de Concorrência — Flip/Capo/Max/123", layout="wide")
 
 AMARELO     = "#F2C94C"
-ROSA_CAPO   = "#E91E63"     # rosa para CAPO
 CINZA_TXT   = "#333333"
 CINZA_BG    = "#F7F7F7"
-GOL_COLOR   = "#F2994A"     # laranja
-AZUL_COLOR  = "#1F4E79"     # azul escuro
-LATAM_COLOR = "#8B0000"     # vermelho escuro
+GOL_COLOR   = "#F2994A"   # laranja
+AZUL_COLOR  = "#1F4E79"   # azul escuro
+LATAM_COLOR = "#8B0000"   # vermelho escuro
 
 st.markdown(
     f"""
@@ -59,6 +58,7 @@ def _list_files(data_dir: str, patterns: List[str] | None = None) -> List[Path]:
     p = Path(data_dir)
     if not p.exists():
         return []
+    # Mantém geral + garante match aos prefixos comuns
     pats = patterns or [
         "*.xlsx", "*.xls", "*.csv", "*.parquet",
         "FLIPMILHAS_*.*", "CAPOVIAGENS_*.*", "MAXMILHAS_*.*", "123MILHAS_*.*"
@@ -67,7 +67,8 @@ def _list_files(data_dir: str, patterns: List[str] | None = None) -> List[Path]:
     for pat in pats:
         out.extend(sorted(p.glob(pat)))
     # remove duplicatas preservando ordem
-    seen = set(); uniq: List[Path] = []
+    seen = set()
+    uniq: List[Path] = []
     for f in out:
         if f not in seen:
             uniq.append(f); seen.add(f)
@@ -86,6 +87,7 @@ def _to_float_series(s: pd.Series) -> pd.Series:
 
 def detect_empresa_from_filename(name: str) -> str:
     u = name.upper()
+    # Prioriza prefixos exatamente como você descreveu
     if re.match(r"^CAPOVIAGENS_", u, flags=re.I):
         return "CAPO VIAGENS"
     if re.match(r"^FLIPMILHAS_", u, flags=re.I):
@@ -94,6 +96,7 @@ def detect_empresa_from_filename(name: str) -> str:
         return "MAXMILHAS"
     if re.match(r"^123MILHAS_", u, flags=re.I):
         return "123MILHAS"
+    # Fallbacks (caso venham nomes diferentes)
     if "FLIP" in u or "FLIPMILHAS" in u:
         return "FLIPMILHAS"
     if "CAPO" in u or "CAPOVIAGENS" in u:
@@ -103,26 +106,6 @@ def detect_empresa_from_filename(name: str) -> str:
     if "123" in u and "MILHAS" in u:
         return "123MILHAS"
     return "N/A"
-
-def _norm_hhmmss(s: pd.Series) -> pd.Series:
-    """Garante HH:MM:SS a partir de texto/horário."""
-    txt = s.astype(str).str.strip()
-    # tenta formatos comuns
-    t = pd.to_datetime(txt, format="%H:%M:%S", errors="coerce")
-    t = t.fillna(pd.to_datetime(txt, format="%H:%M", errors="coerce"))
-    # fallback por regex (pega primeira ocorrência h:m[:s])
-    miss = t.isna()
-    if miss.any():
-        mtxt = txt[miss].str.extract(r"(?P<h>\d{1,2}):(?P<m>\d{2})(?::(?P<s>\d{2}))?")
-        hh = mtxt["h"].fillna("00"); mm = mtxt["m"].fillna("00"); ss = mtxt["s"].fillna("00")
-        tloc = pd.to_datetime(hh + ":" + mm + ":" + ss, format="%H:%M:%S", errors="coerce")
-        t = t.where(~miss, tloc)
-    return t.dt.strftime("%H:%M:%S")
-
-def _norm_ddmmaa_from_any_date(s: pd.Series) -> pd.Series:
-    """Converte qualquer data (inclui AAAA/MM/DD) em DD/MM/AAAA (string)."""
-    d = pd.to_datetime(s, dayfirst=False, errors="coerce")  # CAPO vem AAAA/MM/DD
-    return d.dt.strftime("%d/%m/%Y")
 
 @st.cache_data(show_spinner=False)
 def _read_one(path: str, mtime: float) -> pd.DataFrame:
@@ -143,77 +126,11 @@ def _read_one(path: str, mtime: float) -> pd.DataFrame:
     else:
         return pd.DataFrame()
 
-    # Normaliza nomes de colunas para comparação
-    original_cols = list(df.columns)
-    colmap_upper = {c: re.sub(r"\s+", " ", str(c)).strip().upper() for c in df.columns}
-    cols_upper_set = {v for v in colmap_upper.values()}
+    # Normaliza nomes das colunas
+    colmap = {c: re.sub(r"\s+", " ", str(c)).strip().upper() for c in df.columns}
+    df = df.rename(columns=colmap)
 
-    # ======= Normalização ESPECÍFICA CAPO (captura_data, captura_hora, ...) =======
-    lower_cols = {str(c).strip().lower() for c in original_cols}
-    is_capo_schema = (
-        "captura_data" in lower_cols and
-        "captura_hora" in lower_cols and
-        "trecho" in lower_cols and
-        "antecedencia" in lower_cols and
-        "data_voo" in lower_cols and
-        "cia" in lower_cols and
-        "valor_total" in lower_cols
-    )
-
-    if is_capo_schema or detect_empresa_from_filename(p.name) == "CAPO VIAGENS":
-        # garante lower para acesso
-        df.columns = [str(c).strip().lower() for c in df.columns]
-        # Cria as colunas no padrão do app
-        df_std = pd.DataFrame()
-        df_std["DATA DA BUSCA"]  = _norm_ddmmaa_from_any_date(df.get("captura_data"))
-        df_std["HORA DA BUSCA"]  = _norm_hhmmss(df.get("captura_hora"))
-        df_std["TRECHO"]         = df.get("trecho")
-        df_std["ADVP"]           = pd.to_numeric(df.get("antecedencia"), errors="coerce")
-        df_std["DATA PARTIDA"]   = _norm_ddmmaa_from_any_date(df.get("data_voo"))
-        df_std["HORA DA PARTIDA"]= _norm_hhmmss(df.get("hr_ida")) if "hr_ida" in df.columns else np.nan
-        df_std["DATA CHEGADA"]   = df_std["DATA PARTIDA"]  # CAPO não traz data de volta explícita
-        df_std["HORA DA CHEGADA"]= _norm_hhmmss(df.get("hr_volta")) if "hr_volta" in df.columns else np.nan
-        df_std["CIA DO VOO"]     = df.get("cia").astype(str).str.strip().str.upper()
-        df_std["TARIFA"]         = _to_float_series(df.get("por_adulto"))
-        df_std["TX DE EMBARQUE"] = _to_float_series(df.get("taxa_embarque"))
-        df_std["TX DE SERVIÇO"]  = _to_float_series(df.get("taxa_servico")) if "taxa_servico" in df.columns else np.nan
-        df_std["TOTAL"]          = _to_float_series(df.get("valor_total"))
-        df_std["NUMERO DO VOO"]  = df.get("numero_voo") if "numero_voo" in df.columns else np.nan
-
-        # Metadados
-        df_std["ARQUIVO"] = p.name
-        df_std["CAMINHO"] = str(p)
-        df_std["EMPRESA"] = "CAPO VIAGENS"
-
-        # Datetimes e derivados
-        def _combo_dt(dt_str: pd.Series, hhmmss_str: pd.Series) -> pd.Series:
-            raw = dt_str.fillna("").astype(str).str.strip() + " " + hhmmss_str.fillna("").astype(str).str.strip()
-            return pd.to_datetime(raw, dayfirst=True, errors="coerce")
-
-        df_std["BUSCA_DATETIME"]   = _combo_dt(df_std["DATA DA BUSCA"],   df_std["HORA DA BUSCA"])
-        df_std["PARTIDA_DATETIME"] = _combo_dt(df_std["DATA PARTIDA"],    df_std["HORA DA PARTIDA"])
-        df_std["CHEGADA_DATETIME"] = _combo_dt(df_std["DATA CHEGADA"],    df_std["HORA DA CHEGADA"])
-        df_std["HORA_HH"]          = df_std["BUSCA_DATETIME"].dt.hour
-
-        # ADVP: usa fornecido; se vazio, calcula
-        advp_calc = (df_std["PARTIDA_DATETIME"].dt.normalize() - df_std["BUSCA_DATETIME"].dt.normalize()).dt.days
-        df_std["ADVP"] = df_std["ADVP"].fillna(advp_calc)
-
-        # Ordena colunas base
-        base = [
-            "BUSCA_DATETIME","DATA DA BUSCA","HORA DA BUSCA","HORA_HH",
-            "TRECHO","CIA DO VOO","ADVP",
-            "PARTIDA_DATETIME","DATA PARTIDA","HORA DA PARTIDA",
-            "CHEGADA_DATETIME","DATA CHEGADA","HORA DA CHEGADA",
-            "TARIFA","TX DE EMBARQUE","TX DE SERVIÇO","TOTAL",
-            "NUMERO DO VOO","EMPRESA","ARQUIVO","CAMINHO"
-        ]
-        other = [c for c in df_std.columns if c not in base]
-        return df_std[base + other]
-
-    # ======= Normalização geral (demais empresas) =======
-    df = df.rename(columns=colmap_upper)
-
+    # Alias de colunas comuns
     ren = {
         "CIA": "CIA DO VOO",
         "CIA DO VÔO": "CIA DO VOO",
@@ -227,15 +144,15 @@ def _read_one(path: str, mtime: float) -> pd.DataFrame:
             df = df.rename(columns={k: v})
 
     required = [
-        "DATA DA BUSCA","HORA DA BUSCA","TRECHO",
-        "DATA PARTIDA","HORA DA PARTIDA","DATA CHEGADA","HORA DA CHEGADA",
-        "TARIFA","TX DE EMBARQUE","TOTAL","CIA DO VOO"
+        "DATA DA BUSCA", "HORA DA BUSCA", "TRECHO",
+        "DATA PARTIDA", "HORA DA PARTIDA", "DATA CHEGADA", "HORA DA CHEGADA",
+        "TARIFA", "TX DE EMBARQUE", "TOTAL", "CIA DO VOO"
     ]
     for c in required:
         if c not in df.columns:
             df[c] = np.nan
 
-    for c in ["TARIFA","TX DE EMBARQUE","TOTAL"]:
+    for c in ["TARIFA", "TX DE EMBARQUE", "TOTAL"]:
         df[c] = _to_float_series(df[c])
 
     def combo_dt(dcol: str, tcol: str) -> pd.Series:
@@ -245,20 +162,20 @@ def _read_one(path: str, mtime: float) -> pd.DataFrame:
         dt = pd.to_datetime(raw, dayfirst=True, errors="coerce").fillna(d).fillna(t)
         return dt
 
-    df["BUSCA_DATETIME"]   = combo_dt("DATA DA BUSCA","HORA DA BUSCA")
-    df["PARTIDA_DATETIME"] = combo_dt("DATA PARTIDA","HORA DA PARTIDA")
-    df["CHEGADA_DATETIME"] = combo_dt("DATA CHEGADA","HORA DA CHEGADA")
+    df["BUSCA_DATETIME"]   = combo_dt("DATA DA BUSCA", "HORA DA BUSCA")
+    df["PARTIDA_DATETIME"] = combo_dt("DATA PARTIDA", "HORA DA PARTIDA")
+    df["CHEGADA_DATETIME"] = combo_dt("DATA CHEGADA", "HORA DA CHEGADA")
     df["HORA_HH"] = df["BUSCA_DATETIME"].dt.hour
     df["ADVP"] = (df["PARTIDA_DATETIME"].dt.normalize() - df["BUSCA_DATETIME"].dt.normalize()).dt.days
     df["ARQUIVO"] = p.name; df["CAMINHO"] = str(p); df["EMPRESA"] = detect_empresa_from_filename(p.name)
 
     base = [
-        "BUSCA_DATETIME","DATA DA BUSCA","HORA DA BUSCA","HORA_HH",
-        "TRECHO","CIA DO VOO","ADVP",
-        "PARTIDA_DATETIME","DATA PARTIDA","HORA DA PARTIDA",
-        "CHEGADA_DATETIME","DATA CHEGADA","HORA DA CHEGADA",
-        "TARIFA","TX DE EMBARQUE","TOTAL",
-        "EMPRESA","ARQUIVO","CAMINHO"
+        "BUSCA_DATETIME", "DATA DA BUSCA", "HORA DA BUSCA", "HORA_HH",
+        "TRECHO", "CIA DO VOO", "ADVP",
+        "PARTIDA_DATETIME", "DATA PARTIDA", "HORA DA PARTIDA",
+        "CHEGADA_DATETIME", "DATA CHEGADA", "HORA DA CHEGADA",
+        "TARIFA", "TX DE EMBARQUE", "TOTAL",
+        "EMPRESA", "ARQUIVO", "CAMINHO"
     ]
     other = [c for c in df.columns if c not in base]
     return df[base + other]
@@ -282,7 +199,8 @@ def load_all(data_dir: str) -> pd.DataFrame:
 
 def fmt_moeda0(v) -> str:
     try:
-        if pd.isna(v): return "-"
+        if pd.isna(v):
+            return "-"
         return "R$ " + f"{int(round(float(v))):,}".replace(",", ".")
     except Exception:
         return "-"
@@ -374,8 +292,7 @@ def y_axis(enc: str, title: str="PREÇO", domain=None):
 
 def barras_com_tendencia(df: pd.DataFrame, x_col: str, y_col: str, x_type: str,
                          titulo: str, *, x_title: Optional[str]=None,
-                         y_max: Optional[int]=None, sort=None, bar_color: str = AMARELO):
-    """Barras + rótulo + linha pontilhada."""
+                         y_max: Optional[int]=None, sort=None):
     df = df.copy(); df["_LABEL"] = df[y_col].apply(fmt_pontos)
 
     base = alt.Chart(df).encode(
@@ -384,7 +301,7 @@ def barras_com_tendencia(df: pd.DataFrame, x_col: str, y_col: str, x_type: str,
         y=y_axis(f"{y_col}:Q", domain=[0, y_max] if y_max else None),
         tooltip=[x_col, alt.Tooltip(y_col, format=",.0f")],
     )
-    bars = base.mark_bar(color=bar_color)
+    bars = base.mark_bar(color=AMARELO)
 
     labels = alt.Chart(df).encode(
         x=(x_axis(f"{x_col}:{x_type}", title=x_title).sort(sort)
@@ -492,7 +409,7 @@ def _row_heat_css(row: pd.Series, price_cols: List[str]) -> pd.Series:
     vmin = np.nanmin(vals); vmax = np.nanmax(vals); rng = max(vmax - vmin, 1e-9)
     def interp(v):
         c0=(255,247,224); c1=(242,201,76); t=(v - vmin)/rng
-        r=int(c0[0]+t*(c1[0]-c0[0])); g=int(c0[1]+t*(c1[1]-c0[1])); b=int(c0[2]+t*(c1[2]-c0[2]))
+        r=int(c0[0]+t*(c1[0]-c1[0] if False else c1[0]-c0[0])); g=int(c0[1]+t*(c1[1]-c0[1])); b=int(c0[2]+t*(c1[2]-c0[2]))
         return f"background-color: rgb({r},{g},{b});"
     for c in price_cols:
         v=row[c]
@@ -535,7 +452,7 @@ def top3_tabela(df_emp: pd.DataFrame, agg: str):
 # ==========================
 # Render por empresa
 # ==========================
-def render_empresa(df_emp: pd.DataFrame, key_suffix: str, *, cor_barra: str = AMARELO):
+def render_empresa(df_emp: pd.DataFrame, key_suffix: str):
     menor_preco = st.toggle(
         "Menor preço",
         value=True,
@@ -566,7 +483,7 @@ def render_empresa(df_emp: pd.DataFrame, key_suffix: str, *, cor_barra: str = AM
     y_max_hora = dynamic_limit(by_hora["PRECO"], hard_cap)
     barras_com_tendencia(by_hora, "HORA_HH", "PRECO", "O",
                          "Preço por hora", x_title="HORA",
-                         y_max=y_max_hora, sort=list(range(24)), bar_color=cor_barra)
+                         y_max=y_max_hora, sort=list(range(24)))
 
     # 2) Preço por ADVP
     if menor_preco:
@@ -575,7 +492,7 @@ def render_empresa(df_emp: pd.DataFrame, key_suffix: str, *, cor_barra: str = AM
         by_advp = df_emp.groupby("ADVP", as_index=False)["TOTAL"].mean().rename(columns={"TOTAL":"PRECO"}).sort_values("ADVP")
     y_max_advp = dynamic_limit(by_advp["PRECO"], hard_cap)
     barras_com_tendencia(by_advp, "ADVP", "PRECO", "O",
-                         "Preço por ADVP", y_max=y_max_advp, bar_color=cor_barra)
+                         "Preço por ADVP", y_max=y_max_advp)
 
     # 3) Preço Top 20 trechos
     if menor_preco:
@@ -588,12 +505,12 @@ def render_empresa(df_emp: pd.DataFrame, key_suffix: str, *, cor_barra: str = AM
                           .sort_values("PRECO", ascending=False).head(20))
     y_max_trecho = dynamic_limit(by_trecho["PRECO"], hard_cap)
     barras_com_tendencia(by_trecho, "TRECHO", "PRECO", "N",
-                         "Preço Top 20 trechos", y_max=y_max_trecho, bar_color=cor_barra)
+                         "Preço Top 20 trechos", y_max=y_max_trecho)
 
     # 4) Tabela Top 3
     top3_tabela(df_emp, agg="min" if menor_preco else "mean")
 
-    # 5) SHARE CIAS (mantém paleta por CIA)
+    # 5) SHARE CIAS
     chart_cia_stack_trecho(df_emp)
 
 # ==========================
@@ -601,11 +518,11 @@ def render_empresa(df_emp: pd.DataFrame, key_suffix: str, *, cor_barra: str = AM
 # ==========================
 abas = st.tabs(["FLIPMILHAS","CAPO VIAGENS","MAXMILHAS","123MILHAS"])
 with abas[0]:
-    render_empresa(view_all[view_all["EMPRESA"] == "FLIPMILHAS"].copy(), "FLIPMILHAS", cor_barra=AMARELO)
+    render_empresa(view_all[view_all["EMPRESA"] == "FLIPMILHAS"].copy(), "FLIPMILHAS")
 with abas[1]:
-    # CAPO: mesma estrutura do FLIPMILHAS, com barras rosa
-    render_empresa(view_all[view_all["EMPRESA"] == "CAPO VIAGENS"].copy(), "CAPO", cor_barra=ROSA_CAPO)
+    # CAPO: mesma estrutura do FLIPMILHAS, lendo arquivos CAPOVIAGENS_* na pasta data/
+    render_empresa(view_all[view_all["EMPRESA"] == "CAPO VIAGENS"].copy(), "CAPO")
 with abas[2]:
-    render_empresa(view_all[view_all["EMPRESA"] == "MAXMILHAS"].copy(), "MAX", cor_barra=AMARELO)
+    render_empresa(view_all[view_all["EMPRESA"] == "MAXMILHAS"].copy(), "MAX")
 with abas[3]:
-    render_empresa(view_all[view_all["EMPRESA"] == "123MILHAS"].copy(), "123", cor_barra=AMARELO)
+    render_empresa(view_all[view_all["EMPRESA"] == "123MILHAS"].copy(), "123")
