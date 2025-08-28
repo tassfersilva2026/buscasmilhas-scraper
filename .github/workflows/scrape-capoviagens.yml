@@ -2,13 +2,13 @@ name: scrape-capo-5partes-xls
 
 on:
   schedule:
-    - cron: "*/30 * * * *"   # ajuste a frequência como preferir
+    - cron: "*/30 * * * *"
   workflow_dispatch:
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     permissions:
       contents: write
     env:
@@ -32,6 +32,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: true
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -62,23 +63,37 @@ jobs:
         shell: bash
         run: |
           set -e
-          # encontra o script se não estiver na raiz
           if [ ! -f "$SCRIPT_PATH" ]; then
-            echo "Script não está na raiz. Procurando..."
+            echo "Procurando script..."
             FOUND=$(find . -maxdepth 3 -type f -name "capoviagens_scraper_gha.py" | head -n1 || true)
             if [ -z "$FOUND" ]; then
               echo "ERRO: capoviagens_scraper_gha.py não encontrado." >&2
               exit 1
             fi
             SCRIPT_PATH="$FOUND"
-            echo "Usando script: $SCRIPT_PATH"
+            echo "Usando: $SCRIPT_PATH"
           fi
           python "$SCRIPT_PATH"
 
-      - name: Commit XLS files
+      - name: Commit XLS files (com rebase + retry)
+        shell: bash
         run: |
+          set -e
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add data/*.xls 2>/dev/null || true
+          BRANCH="${GITHUB_REF_NAME}"
+          git add -A
           git commit -m "CAPO ${{ matrix.grupo.nome }} XLS $(date -u +'%Y-%m-%dT%H:%M:%SZ')" || echo "nada a commitar"
-          git push || true
+
+          n=0
+          until [ $n -ge 5 ]
+          do
+            git pull --rebase origin "$BRANCH" || true
+            if git push origin "$BRANCH"; then
+              echo "Push OK"
+              break
+            fi
+            n=$((n+1))
+            echo "Push falhou, retry $n/5 após pequeno backoff..."
+            sleep $((2*n))
+          done
