@@ -2,33 +2,38 @@
 # -*- coding: utf-8 -*-
 
 """
-Capo Viagens — scraper headless para GitHub Actions
-- Hard-timeout 60s por busca
+Capo Viagens — Scraper para GitHub Actions (headless)
+- Hard-timeout por busca (default 60s)
 - Checagem "Não encontramos voo" aos 30s
-- Fallback por texto do DOM (innerText)
-- Datas/horas como tipos (Excel-friendly)
-- Timezone America/Sao_Paulo
-- Saída: ./data/CAPO_YYYYMMDD_HHMMSS.xlsx
+- Fallback por texto visível (innerText) se XPath quebrar
+- Datas/Horas como tipos reais no Excel (sem texto)
+- Timezone: America/Sao_Paulo
+- Saída: <out_dir>/CAPO_<YYYYMMDD_HHMMSS>.xlsx
 
-Requisitos:
-  pip install -r requirements.txt
+Uso (Actions):
+  python -u scripts/capoviagens_scraper_gha.py \
+    --out-dir data/G1 \
+    --trechos "CGH-SDU,SDU-CGH,GRU-POA,POA-GRU" \
+    --advps "1,5,11,17,30" \
+    --timeout 60 --check-no-results 30 --poll 1 --headless
 """
 
 import os, re, time, argparse
 from datetime import datetime, timedelta, date, time as dtime
 from typing import Tuple, List, Dict, Optional
 from zoneinfo import ZoneInfo
+
 import pandas as pd
 
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
-from webdriver_manager.chrome import ChromeDriverManager
 
-# ============================== PARÂMETROS ===============================
-ADVP_LIST: List[int] = [1, 3, 7, 14, 21, 30, 60, 90]
-TRECHOS: List[Tuple[str, str]] = [
+# ============================== Defaults ==============================
+TZ = ZoneInfo("America/Sao_Paulo")
+DEFAULT_ADVP = [1, 3, 7, 14, 21, 30, 60, 90]
+DEFAULT_TRECHOS = [
     ("CGH", "SDU"), ("SDU", "CGH"),
     ("GRU", "POA"), ("POA", "GRU"),
     ("CGH", "GIG"), ("GIG", "CGH"),
@@ -41,12 +46,7 @@ TRECHOS: List[Tuple[str, str]] = [
     ("BSB", "SDU"), ("SDU", "BSB"),
 ]
 
-TIMEOUT_POR_BUSCA = 60
-CHECK_NO_RESULTS_AT = 30
-POLL_INTERVAL = 1
-TZ = ZoneInfo("America/Sao_Paulo")
-
-# ============================== XPATHS ===============================
+# ============================== XPaths ==============================
 X_CIA           = "//*[@id='__next']/div[4]/div[5]/div/main/div[2]/div/div[1]/div[1]/div[1]/div[1]/label/div[1]/div/span"
 X_HR_PARTIDA    = "//*[@id='__next']/div[4]/div[5]/div/main/div[2]/div/div[1]/div[1]/div[1]/div[1]/label/label/div/div/div[1]/span[1]"
 X_HR_CHEGADA    = "//*[@id='__next']/div[4]/div[5]/div/main/div[2]/div/div[1]/div[1]/div[1]/div[1]/label/label/div/div/div[3]/span[1]"
@@ -57,11 +57,36 @@ X_TOTAL         = "//*[@id='__next']/div[4]/div[5]/div/main/div[2]/div/div[1]/di
 X_CIA_FALLBACK  = "//span[contains(@style,'font-size') and normalize-space(text())!='' and string-length(normalize-space(text()))<=10]"
 X_NO_RESULTS_H1 = "//*[@id='__next']/div[4]/div[1]/div/div/div/h1"
 
-# ============================== HELPERS ===============================
-def _mk_driver(headless: bool) -> webdriver.Chrome:
+# ============================== Utilitários ==============================
+CURRENCY_RE = re.compile(r"R\$\s*\d{1,3}(?:\.\d{3})*,\d{2}")
+TIME_RE     = re.compile(r"\b(\d{1,2}):(\d{2})(?::(\d{2}))?\b")
+CIAS_LIST   = ["AZUL", "LATAM", "GOL", "VOEPASS", "PASSAREDO"]
+
+def _parse_trechos_csv(s: Optional[str]) -> List[Tuple[str, str]]:
+    if not s:
+        return DEFAULT_TRECHOS
+    pairs = []
+    for part in s.split(","):
+        part = part.strip()
+        if not part or "-" not in part:
+            continue
+        o, d = part.split("-", 1)
+        pairs.append((o.strip().upper(), d.strip().upper()))
+    return pairs or DEFAULT_TRECHOS
+
+def _parse_advp_csv(s: Optional[str]) -> List[int]:
+    if not s:
+        return DEFAULT_ADVP
+    out = []
+    for x in s.split(","):
+        x = x.strip()
+        if x.isdigit():
+            out.append(int(x))
+    return out or DEFAULT_ADVP
+
+def _mk_driver(headless: bool, pageload_timeout: int) -> webdriver.Chrome:
     opts = Options()
-    if headless:
-        # headless robusto p/ CI
+    if headless or os.environ.get("CI", "").lower() == "true":
         opts.add_argument("--headless=new")
         opts.add_argument("--no-sandbox")
         opts.add_argument("--disable-dev-shm-usage")
@@ -70,12 +95,20 @@ def _mk_driver(headless: bool) -> webdriver.Chrome:
     opts.add_argument("--log-level=3")
     opts.add_experimental_option("excludeSwitches", ["enable-automation"])
     opts.add_experimental_option('useAutomationExtension', False)
-    # DOM básico liberado cedo
+    # Carrega DOM básico sem esperar tudo
     opts.set_capability("pageLoadStrategy", "eager")
 
-    service = Service(ChromeDriverManager().install())
+    # Usa chromedriver do action se existir
+    exe = os.environ.get("CHROMEDRIVER_PATH")
+    service = Service(executable_path=exe) if exe else Service()
+
     driver = webdriver.Chrome(service=service, options=opts)
-    driver.set_page_load_timeout(25)
+    try:
+        driver.set_page_load_timeout(int(pageload_timeout))
+    except Exception:
+        driver.set_page_load_timeout(25)
+
+    # Anti-detecção simples
     try:
         driver.execute_cdp_cmd(
             "Page.addScriptToEvaluateOnNewDocument",
@@ -121,7 +154,6 @@ def _to_timeobj(s: str) -> Optional[dtime]:
         return None
 
 def _dismiss_cookies(driver: webdriver.Chrome):
-    # onetrust padrão + tentativas em português
     try:
         el = driver.find_elements(By.CSS_SELECTOR, "button#onetrust-accept-btn-handler")
         if el:
@@ -159,10 +191,6 @@ def _scrape_text_main(driver: webdriver.Chrome) -> str:
         """) or ""
     except Exception:
         return ""
-
-CURRENCY_RE = re.compile(r"R\$\s*\d{1,3}(?:\.\d{3})*,\d{2}")
-TIME_RE     = re.compile(r"\b(\d{1,2}):(\d{2})(?::(\d{2}))?\b")
-CIAS_LIST   = ["AZUL", "LATAM", "GOL", "VOEPASS", "PASSAREDO"]
 
 def _fallback_parse(text: str) -> Dict[str, Optional[str]]:
     t = text.replace("\xa0", " ").strip()
@@ -223,11 +251,13 @@ def _print_row_log(reg: Dict, motivo: str = ""):
         f"TX_EMBARQUE={reg['TX DE EMBARQUE']:.2f} "
         f"TX_SERVICO={reg['TX DE SERVIÇO']:.2f} "
         f"TOTAL={reg['TOTAL']:.2f} "
-        f"CIA={reg['CIA DO VOO']}"
+        f"CIA={reg['CIA DO VOO']}",
+        flush=True
     )
 
-# ============================== COLETA ===============================
-def _busca(driver: webdriver.Chrome, orig: str, dest: str, dias: int) -> Dict:
+# ============================== Core ==============================
+def _busca(driver: webdriver.Chrome, orig: str, dest: str, dias: int,
+           timeout_per_search: int, check_no_results_at: int, poll_interval: int) -> Dict:
     agora = datetime.now(TZ)
     data_busca = agora.date()
     hora_busca = agora.time().replace(microsecond=0)
@@ -301,60 +331,68 @@ def _busca(driver: webdriver.Chrome, orig: str, dest: str, dias: int) -> Dict:
                 motivo = "OK_FALLBACK_TEXT"
                 break
 
-        # 3) "Não encontramos voo" aos 30s
-        if elapsed >= CHECK_NO_RESULTS_AT and _tem_no_results(driver):
+        # 3) "Não encontramos voo" aos Xs
+        if elapsed >= check_no_results_at and _tem_no_results(driver):
             cia = "SEM OFERTAS"
-            motivo = "NO_RESULTS_30s"
+            motivo = "NO_RESULTS"
             break
 
-        # 4) Timeout 60s
-        if elapsed >= TIMEOUT_POR_BUSCA:
+        # 4) Hard-timeout
+        if elapsed >= timeout_per_search:
             cia = "SEM OFERTAS"
-            motivo = "TIMEOUT_60s"
+            motivo = "TIMEOUT"
             break
 
-        time.sleep(POLL_INTERVAL)
+        time.sleep(poll_interval)
 
     row = {
-        "DATA DA BUSCA": data_busca,          # date
-        "HORA DA BUSCA": hora_busca,          # time
+        "DATA DA BUSCA": data_busca,
+        "HORA DA BUSCA": hora_busca,
         "TRECHO": f"{orig}-{dest}",
-        "DATA PARTIDA": data_partida,         # date
-        "HORA DA PARTIDA": hr_partida,        # time | None
-        "HORA DA CHEGADA": hr_chegada,        # time | None
+        "DATA PARTIDA": data_partida,
+        "HORA DA PARTIDA": hr_partida,
+        "HORA DA CHEGADA": hr_chegada,
         "TARIFA": round(float(tarifa), 2),
         "TX DE EMBARQUE": round(float(tx_embarque), 2),
         "TOTAL": round(float(total), 2),
         "CIA DO VOO": cia,
         "TX DE SERVIÇO": round(float(tx_servico), 2),
     }
-
     _print_row_log(row, motivo=motivo)
     return row
 
-# ============================== CLI / EXECUÇÃO ===============================
+# ============================== Main ==============================
 def main():
-    parser = argparse.ArgumentParser(description="Scraper Capo Viagens (headless-ready)")
-    parser.add_argument("--out-dir", default="data", help="Diretório de saída (default: data)")
-    parser.add_argument("--headless", action="store_true", default=bool(os.environ.get("CI")), help="Força headless")
+    parser = argparse.ArgumentParser(description="Scraper Capo Viagens (CI-ready)")
+    parser.add_argument("--out-dir", default=os.environ.get("OUT_DIR", "data"), help="Diretório de saída")
+    parser.add_argument("--trechos", default=os.environ.get("TRECHOS_CSV"), help="Lista CSV: CGH-SDU,SDU-CGH,...")
+    parser.add_argument("--advps", default=os.environ.get("ADVPS_CSV"), help="Lista CSV: 1,3,7,...")
+    parser.add_argument("--timeout", type=int, default=int(os.environ.get("TIMEOUT_PER_SEARCH", "60")))
+    parser.add_argument("--check-no-results", type=int, default=int(os.environ.get("CHECK_NO_RESULTS_AT", "30")))
+    parser.add_argument("--poll", type=int, default=int(os.environ.get("POLL_INTERVAL", "1")))
+    parser.add_argument("--pageload-timeout", type=int, default=int(os.environ.get("PAGELOAD_TIMEOUT", "25")))
+    parser.add_argument("--headless", action="store_true", default=(os.environ.get("CI","").lower()=="true"))
     args = parser.parse_args()
 
     out_dir = args.out_dir
     os.makedirs(out_dir, exist_ok=True)
 
-    driver = _mk_driver(headless=args.headless)
+    trechos = _parse_trechos_csv(args.trechos)
+    advps = _parse_advp_csv(args.advps)
+
+    driver = _mk_driver(headless=args.headless, pageload_timeout=args.pageload_timeout)
     try:
         iter_ts = datetime.now(TZ).strftime("%Y%m%d_%H%M%S")
         saida = os.path.join(out_dir, f"CAPO_{iter_ts}.xlsx")
         registros: List[Dict] = []
 
-        print(f"\n=== INÍCIO ({iter_ts}) — {len(TRECHOS)} trechos x {len(ADVP_LIST)} ADVPs ===")
-        print(f"Hard-timeout: {TIMEOUT_POR_BUSCA}s | 'Não encontramos voo' aos {CHECK_NO_RESULTS_AT}s | Headless={args.headless}\n")
+        print(f"\n=== INÍCIO ({iter_ts}) — {len(trechos)} trechos x {len(advps)} ADVPs ===", flush=True)
+        print(f"Timeout/busca: {args.timeout}s | 'No results' aos {args.check_no_results}s | Headless={args.headless}\n", flush=True)
 
-        for orig, dest in TRECHOS:
-            for dias in ADVP_LIST:
-                print(f"[BUSCA] {orig}-{dest} | ADVP={dias}d")
-                registros.append(_busca(driver, orig, dest, dias))
+        for (orig, dest) in trechos:
+            for dias in advps:
+                print(f"[BUSCA] {orig}-{dest} | ADVP={dias}d", flush=True)
+                registros.append(_busca(driver, orig, dest, dias, args.timeout, args.check_no_results, args.poll))
 
         colunas = [
             "DATA DA BUSCA","HORA DA BUSCA","TRECHO","DATA PARTIDA",
@@ -363,13 +401,12 @@ def main():
         ]
         df = pd.DataFrame(registros, columns=colunas)
 
+        # Escreve XLSX com formatos de data/hora
         with pd.ExcelWriter(saida, engine="openpyxl") as writer:
             sheet = "DADOS"
             df.to_excel(writer, index=False, sheet_name=sheet)
-            wb = writer.book
             ws = writer.sheets[sheet]
 
-            # map header->col
             header_map = {cell.value: cell.column for cell in ws[1]}
             DATE_FMT = "DD/MM/YYYY"
             TIME_FMT = "HH:MM:SS"
@@ -390,7 +427,8 @@ def main():
                         if cell.value is not None:
                             cell.number_format = TIME_FMT
 
-        print(f"\nArquivo gerado: {saida}\n")
+        print(f"\nArquivo gerado: {saida}\n", flush=True)
+
     finally:
         try: driver.quit()
         except Exception: pass
