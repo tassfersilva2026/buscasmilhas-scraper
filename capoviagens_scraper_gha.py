@@ -95,10 +95,9 @@ def _mk_driver(headless: bool, pageload_timeout: int) -> webdriver.Chrome:
     opts.add_argument("--log-level=3")
     opts.add_experimental_option("excludeSwitches", ["enable-automation"])
     opts.add_experimental_option('useAutomationExtension', False)
-    # Carrega DOM básico sem esperar tudo
+    # DOM básico sem esperar tudo
     opts.set_capability("pageLoadStrategy", "eager")
 
-    # Usa chromedriver do action se existir
     exe = os.environ.get("CHROMEDRIVER_PATH")
     service = Service(executable_path=exe) if exe else Service()
 
@@ -199,11 +198,11 @@ def _fallback_parse(text: str) -> Dict[str, Optional[str]]:
     up = t.upper()
 
     cia = None
-    for c in CIAS_LIST:
+    for c in ["AZUL", "LATAM", "GOL", "VOEPASS", "PASSAREDO"]:
         if c in up:
             cia = c.title(); break
 
-    times = TIME_RE.findall(t)
+    times = re.findall(r"\b(\d{1,2}):(\d{2})(?::(\d{2}))?\b", t)
     hhmm = []
     for h, m, s in times:
         h, m = int(h), int(m)
@@ -212,7 +211,7 @@ def _fallback_parse(text: str) -> Dict[str, Optional[str]]:
     h_ida = hhmm[0] if hhmm else None
     h_volta = hhmm[1] if len(hhmm) > 1 else None
 
-    prices = list(CURRENCY_RE.finditer(t))
+    prices = list(re.finditer(r"R\$\s*\d{1,3}(?:\.\d{3})*,\d{2}", t))
     total = tarifa = tx_emb = tx_serv = None
     if prices:
         idx_total = up.find("TOTAL")
@@ -232,7 +231,13 @@ def _fallback_parse(text: str) -> Dict[str, Optional[str]]:
     return {"cia": cia, "h_ida": h_ida, "h_volta": h_volta, "tarifa": tarifa, "tx_emb": tx_emb, "tx_serv": tx_serv, "total": total}
 
 def _money_str_to_float(s: Optional[str]) -> float:
-    return _money_to_float(s or "")
+    if not s:
+        return 0.0
+    t = re.sub(r"[^0-9,.-]", "", s).replace(".", "").replace(",", ".")
+    try:
+        return round(float(t), 2)
+    except Exception:
+        return 0.0
 
 def _fmt_time_for_log(t: Optional[dtime]) -> str:
     return t.strftime("%H:%M:%S") if isinstance(t, dtime) else "-"
@@ -255,7 +260,6 @@ def _print_row_log(reg: Dict, motivo: str = ""):
         flush=True
     )
 
-# ============================== Core ==============================
 def _busca(driver: webdriver.Chrome, orig: str, dest: str, dias: int,
            timeout_per_search: int, check_no_results_at: int, poll_interval: int) -> Dict:
     agora = datetime.now(TZ)
@@ -313,10 +317,10 @@ def _busca(driver: webdriver.Chrome, orig: str, dest: str, dias: int,
             motivo = "OK_XPATH"
             break
 
-        # 2) Fallback por texto
-        text = _scrape_text_main(driver)
-        if text:
-            fb = _fallback_parse(text)
+        # 2) Fallback texto
+        t = _scrape_text_main(driver)
+        if t:
+            fb = _fallback_parse(t)
             total_fb = _money_str_to_float(fb.get("total"))
             if (fb.get("cia") and total_fb > 0) or (total_fb > 0):
                 cia = (fb.get("cia") or "DESCONHECIDA").strip()
@@ -331,7 +335,7 @@ def _busca(driver: webdriver.Chrome, orig: str, dest: str, dias: int,
                 motivo = "OK_FALLBACK_TEXT"
                 break
 
-        # 3) "Não encontramos voo" aos Xs
+        # 3) "Não encontramos voo"
         if elapsed >= check_no_results_at and _tem_no_results(driver):
             cia = "SEM OFERTAS"
             motivo = "NO_RESULTS"
@@ -361,12 +365,11 @@ def _busca(driver: webdriver.Chrome, orig: str, dest: str, dias: int,
     _print_row_log(row, motivo=motivo)
     return row
 
-# ============================== Main ==============================
 def main():
     parser = argparse.ArgumentParser(description="Scraper Capo Viagens (CI-ready)")
-    parser.add_argument("--out-dir", default=os.environ.get("OUT_DIR", "data"), help="Diretório de saída")
-    parser.add_argument("--trechos", default=os.environ.get("TRECHOS_CSV"), help="Lista CSV: CGH-SDU,SDU-CGH,...")
-    parser.add_argument("--advps", default=os.environ.get("ADVPS_CSV"), help="Lista CSV: 1,3,7,...")
+    parser.add_argument("--out-dir", default=os.environ.get("OUT_DIR", "data"))
+    parser.add_argument("--trechos", default=os.environ.get("TRECHOS_CSV"))
+    parser.add_argument("--advps", default=os.environ.get("ADVPS_CSV"))
     parser.add_argument("--timeout", type=int, default=int(os.environ.get("TIMEOUT_PER_SEARCH", "60")))
     parser.add_argument("--check-no-results", type=int, default=int(os.environ.get("CHECK_NO_RESULTS_AT", "30")))
     parser.add_argument("--poll", type=int, default=int(os.environ.get("POLL_INTERVAL", "1")))
