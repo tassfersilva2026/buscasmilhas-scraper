@@ -1,0 +1,24 @@
+name: Delete CAPO files
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+
+jobs:
+  nuke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - name: Remove CAPO files
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm -f -- data/CAPO* || true
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: remove data/CAPO*"
+            git push
+          else
+            echo "Nada para remover."
+          fi
