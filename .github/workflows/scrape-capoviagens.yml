@@ -13,8 +13,8 @@ jobs:
       contents: write
     env:
       TZ: America/Sao_Paulo
-      PYTHONUNBUFFERED: "1"   # logs sem buffer
-      CI: "true"              # ativa headless no script
+      PYTHONUNBUFFERED: "1"
+      CI: "true"
 
     strategy:
       fail-fast: false
@@ -51,8 +51,12 @@ jobs:
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
-          # requisitos mínimos
           pip install selenium==4.24.0 pandas==2.2.2 openpyxl==3.1.5
+
+      - name: Debug repo tree (se necessário)
+        run: |
+          echo "PWD: $(pwd)"
+          ls -R || true
 
       - name: Run ${{ matrix.grupo.nome }}
         shell: bash
@@ -62,8 +66,31 @@ jobs:
         run: |
           set -e
           mkdir -p "data/${{ matrix.grupo.nome }}"
-          # timeout controla o passo (guarda margem dentro do job de 25m)
-          timeout 22m python -u scripts/capoviagens_scraper_gha.py \
+
+          # Candidatos conhecidos
+          CANDIDATES=("scripts/capoviagens_scraper_gha.py" \
+                      "scripts/capo_scraper.py" \
+                      "capoviagens_scraper_gha.py" \
+                      "capo_scraper.py")
+
+          SCRIPT_PATH=""
+          for c in "${CANDIDATES[@]}"; do
+            if [ -f "$c" ]; then SCRIPT_PATH="$c"; break; fi
+          done
+
+          # Último recurso: procurar no repo
+          if [ -z "$SCRIPT_PATH" ]; then
+            FOUND=$(git ls-files | grep -E '(capoviagens_scraper_gha|capo_scraper)\.py$' | head -n1 || true)
+            if [ -n "$FOUND" ]; then SCRIPT_PATH="$FOUND"; fi
+          fi
+
+          if [ -z "$SCRIPT_PATH" ]; then
+            echo "ERRO: script Python não encontrado. Esperado em scripts/capoviagens_scraper_gha.py" >&2
+            exit 1
+          fi
+
+          echo "Usando script: $SCRIPT_PATH"
+          timeout 22m python -u "$SCRIPT_PATH" \
             --out-dir "data/${{ matrix.grupo.nome }}" \
             --trechos "${TRECHOS_CSV}" \
             --advps "${ADVPS_CSV}" \
