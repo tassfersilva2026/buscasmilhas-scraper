@@ -2,7 +2,7 @@ name: scrape-capo-5partes-xls
 
 on:
   schedule:
-    - cron: "*/10 * * * *"   # agora roda a cada 10 minutos (UTC)
+    - cron: "*/10 * * * *"   # a cada 10 minutos (UTC)
   workflow_dispatch:
 
 jobs:
@@ -13,6 +13,7 @@ jobs:
       contents: write
     env:
       TZ: America/Sao_Paulo
+
     strategy:
       fail-fast: false
       matrix:
@@ -23,6 +24,7 @@ jobs:
           - { nome: G4, trechos: "BSB-GIG,GIG-BSB,GIG-REC,REC-GIG" }
           - { nome: G5, trechos: "GIG-SSA,SSA-GIG,BSB-SDU,SDU-BSB" }
 
+    # Mantém os 5 paralelos, mas cada um só mexe na sua pasta -> menos conflito
     concurrency:
       group: capo-xls-${{ matrix.grupo.nome }}
       cancel-in-progress: false
@@ -38,6 +40,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: "pip"
 
       - name: Setup Chrome + Chromedriver
         uses: browser-actions/setup-chrome@v2
@@ -47,8 +50,10 @@ jobs:
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
+          # Se existir requirements, instala
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-          pip install selenium pandas xlwt webdriver-manager
+          # Garante os mínimos necessários ao .xlsx + selenium
+          pip install selenium==4.24.0 pandas==2.2.2 openpyxl==3.1.5 webdriver-manager==4.0.2
 
       - name: Run ${{ matrix.grupo.nome }}
         env:
@@ -63,6 +68,10 @@ jobs:
         shell: bash
         run: |
           set -e
+          # cria pasta por grupo para reduzir conflito
+          mkdir -p "data/${GROUP_NAME}"
+
+          # acha o script se não estiver na raiz
           if [ ! -f "$SCRIPT_PATH" ]; then
             echo "Procurando script..."
             FOUND=$(find . -maxdepth 3 -type f -name "capoviagens_scraper_gha.py" | head -n1 || true)
@@ -73,27 +82,48 @@ jobs:
             SCRIPT_PATH="$FOUND"
             echo "Usando: $SCRIPT_PATH"
           fi
+
+          # Executa (seu script deve respeitar TRECHOS_CSV/ADVPS_CSV/GROUP_NAME p/ nome do arquivo)
           python "$SCRIPT_PATH"
 
-      - name: Commit XLS files (com rebase + retry)
+          # Move saídas para a pasta do grupo (aceita .xls e .xlsx)
+          shopt -s nullglob
+          for f in data/*.xls data/*.xlsx; do
+            mv "$f" "data/${GROUP_NAME}/" || true
+          done
+          shopt -u nullglob
+
+      - name: Commit only this group's files (rebase + retry)
         shell: bash
         run: |
           set -e
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           BRANCH="${GITHUB_REF_NAME}"
-          git add -A
-          git commit -m "CAPO ${{ matrix.grupo.nome }} XLS $(date -u +'%Y-%m-%dT%H:%M:%SZ')" || echo "nada a commitar"
+
+          # Puxa a ponta antes de adicionar
+          git fetch origin "$BRANCH"
+          git checkout "$BRANCH"
+          git rebase "origin/$BRANCH" || git reset --hard "origin/$BRANCH"
+
+          # Adiciona só a pasta do grupo
+          git add "data/${{ matrix.grupo.nome }}/" || true
+          if git diff --cached --quiet; then
+            echo "Sem mudanças para commit."
+            exit 0
+          fi
+
+          git commit -m "CAPO ${{ matrix.grupo.nome }} XLS $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
 
           n=0
           until [ $n -ge 5 ]
           do
-            git pull --rebase origin "$BRANCH" || true
             if git push origin "$BRANCH"; then
               echo "Push OK"
               break
             fi
             n=$((n+1))
-            echo "Push falhou, retry $n/5 após pequeno backoff..."
+            echo "Push falhou, retry $n/5..."
+            git pull --rebase origin "$BRANCH" || git reset --hard "origin/$BRANCH"
             sleep $((2*n))
           done
