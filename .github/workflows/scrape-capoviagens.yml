@@ -13,6 +13,8 @@ jobs:
       contents: write
     env:
       TZ: America/Sao_Paulo
+      PYTHONUNBUFFERED: "1"   # logs sem buffer
+      CI: "true"              # ativa headless no script
 
     strategy:
       fail-fast: false
@@ -24,7 +26,6 @@ jobs:
           - { nome: G4, trechos: "BSB-GIG,GIG-BSB,GIG-REC,REC-GIG" }
           - { nome: G5, trechos: "GIG-SSA,SSA-GIG,BSB-SDU,SDU-BSB" }
 
-    # Mantém os 5 paralelos, mas cada um só mexe na sua pasta -> menos conflito
     concurrency:
       group: capo-xls-${{ matrix.grupo.nome }}
       cancel-in-progress: false
@@ -50,48 +51,27 @@ jobs:
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
-          # Se existir requirements, instala
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-          # Garante os mínimos necessários ao .xlsx + selenium
-          pip install selenium==4.24.0 pandas==2.2.2 openpyxl==3.1.5 webdriver-manager==4.0.2
+          # requisitos mínimos
+          pip install selenium==4.24.0 pandas==2.2.2 openpyxl==3.1.5
 
       - name: Run ${{ matrix.grupo.nome }}
+        shell: bash
         env:
           TRECHOS_CSV: ${{ matrix.grupo.trechos }}
           ADVPS_CSV: "1,5,11,17,30"
-          GROUP_NAME: ${{ matrix.grupo.nome }}
-          WAIT_SECONDS: "12"
-          MAX_ATTEMPTS: "2"
-          SLEEP_RETRY: "4"
-          PAGELOAD_TIMEOUT: "30"
-          SCRIPT_PATH: "capoviagens_scraper_gha.py"
-        shell: bash
         run: |
           set -e
-          # cria pasta por grupo para reduzir conflito
-          mkdir -p "data/${GROUP_NAME}"
-
-          # acha o script se não estiver na raiz
-          if [ ! -f "$SCRIPT_PATH" ]; then
-            echo "Procurando script..."
-            FOUND=$(find . -maxdepth 3 -type f -name "capoviagens_scraper_gha.py" | head -n1 || true)
-            if [ -z "$FOUND" ]; then
-              echo "ERRO: capoviagens_scraper_gha.py não encontrado." >&2
-              exit 1
-            fi
-            SCRIPT_PATH="$FOUND"
-            echo "Usando: $SCRIPT_PATH"
-          fi
-
-          # Executa (seu script deve respeitar TRECHOS_CSV/ADVPS_CSV/GROUP_NAME p/ nome do arquivo)
-          python "$SCRIPT_PATH"
-
-          # Move saídas para a pasta do grupo (aceita .xls e .xlsx)
-          shopt -s nullglob
-          for f in data/*.xls data/*.xlsx; do
-            mv "$f" "data/${GROUP_NAME}/" || true
-          done
-          shopt -u nullglob
+          mkdir -p "data/${{ matrix.grupo.nome }}"
+          # timeout controla o passo (guarda margem dentro do job de 25m)
+          timeout 22m python -u scripts/capoviagens_scraper_gha.py \
+            --out-dir "data/${{ matrix.grupo.nome }}" \
+            --trechos "${TRECHOS_CSV}" \
+            --advps "${ADVPS_CSV}" \
+            --timeout 60 \
+            --check-no-results 30 \
+            --poll 1 \
+            --pageload-timeout 30 \
+            --headless
 
       - name: Commit only this group's files (rebase + retry)
         shell: bash
@@ -101,12 +81,10 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           BRANCH="${GITHUB_REF_NAME}"
 
-          # Puxa a ponta antes de adicionar
           git fetch origin "$BRANCH"
           git checkout "$BRANCH"
           git rebase "origin/$BRANCH" || git reset --hard "origin/$BRANCH"
 
-          # Adiciona só a pasta do grupo
           git add "data/${{ matrix.grupo.nome }}/" || true
           if git diff --cached --quiet; then
             echo "Sem mudanças para commit."
@@ -116,8 +94,7 @@ jobs:
           git commit -m "CAPO ${{ matrix.grupo.nome }} XLS $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
 
           n=0
-          until [ $n -ge 5 ]
-          do
+          until [ $n -ge 5 ]; do
             if git push origin "$BRANCH"; then
               echo "Push OK"
               break
