@@ -2,7 +2,7 @@ name: scrape-flipmilhas
 
 on:
   schedule:
-    - cron: "*/60 * * * *"   # a cada 60 min (UTC)
+    - cron: "0 * * * *" # a cada 60 min (UTC)
   workflow_dispatch:
 
 jobs:
@@ -17,19 +17,30 @@ jobs:
       cancel-in-progress: false
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: true
+          ref: ${{ github.ref_name }}
 
-      - uses: actions/setup-python@v5
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      # Chrome + Chromedriver compatível
-      - uses: browser-actions/setup-chrome@v2
+      # Instala Chrome + Chromedriver compatíveis e expõe paths/versões via outputs
+      - name: Setup Chrome
         id: chrome
+        uses: browser-actions/setup-chrome@v2
         with:
           install-chromedriver: true
+
+      # Remove chromedriver pré-instalado do runner para evitar conflito
+      - name: Remove preinstalled chromedriver
+        run: |
+          sudo rm -f /opt/hostedtoolcache/setup-chrome/chromedriver/stable/x64/chromedriver || true
+          which chromedriver || echo "chromedriver not found in PATH (ok)"
 
       - name: Install deps
         run: |
@@ -37,7 +48,7 @@ jobs:
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           python -m pip install "selenium>=4.24.0" "openpyxl>=3.1.2"
 
-      - name: Sanity check (ver versões)
+      - name: Sanity check (versions)
         run: |
           echo "Chrome:       ${{ steps.chrome.outputs.chrome-version }}"
           echo "Chromedriver: ${{ steps.chrome.outputs.chromedriver-version }}"
@@ -51,35 +62,41 @@ jobs:
         run: |
           python flipmilhas_scraper_gha.py --headless --once
 
-      # === Commita XLS com timestamp em data/ e expõe um "flag" se comitou ===
-      - name: Commit cópia com timestamp local em data/
+      # Puxa antes de commitar para evitar conflitos
+      - name: Pull (rebase)
+        env:
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin "$BRANCH"
+          git checkout "$BRANCH"
+          git pull --rebase origin "$BRANCH" || true
+
+      # Copia com timestamp e commita se houver mudanças
+      - name: Commit cópia com timestamp em data/
         id: commit_data
         run: |
           mkdir -p data
           ts=$(date +'%Y%m%d_%H%M%S')
-          # copia; se por acaso não existir (falha anterior), não quebra
           cp -f output/FLIPMILHAS.xlsx "data/FLIPMILHAS_${ts}.xlsx" || true
-
-          git config user.name  "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           git add data/*.xlsx || true
           if git diff --cached --quiet; then
-            echo "Sem mudanças para commitar."
             echo "did_commit=0" >> "$GITHUB_OUTPUT"
+            echo "Sem mudanças para commitar."
           else
             GIT_AUTHOR_DATE="$(date -R)" GIT_COMMITTER_DATE="$(date -R)" \
             git commit -m "Atualiza FLIPMILHAS.xlsx (${ts}) [localtime]"
             echo "did_commit=1" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Pull (rebase) e Push
+      - name: Push
+        if: ${{ steps.commit_data.outputs.did_commit == '1' }}
         env:
           BRANCH: ${{ github.ref_name }}
         run: |
-          git fetch origin "$BRANCH"
-          git pull --rebase origin "$BRANCH" || true
-          git push origin HEAD:"$BRANCH" || true
+          git push origin HEAD:"$BRANCH"
 
       - name: Upload artifact (planilha)
         if: always()
@@ -88,8 +105,8 @@ jobs:
           name: FLIPMILHAS-planilha
           path: output/FLIPMILHAS.xlsx
 
-      # === Reboot do Streamlit: se não houve commit de dado, faz commit vazio ===
-      - name: Trigger Streamlit redeploy (empty commit se nada mudou)
+      # Reboot do Streamlit: commit vazio só se nada mudou
+      - name: Trigger Streamlit redeploy (empty commit)
         if: ${{ success() && steps.commit_data.outputs.did_commit == '0' }}
         env:
           BRANCH: ${{ github.ref_name }}
