@@ -2,7 +2,7 @@ name: scrape-capo-5partes-xls
 
 on:
   schedule:
-    - cron: "*/10 * * * *"   # a cada 10 minutos (UTC)
+    - cron: "*/10 * * * *" # a cada 10 minutos (UTC)
   workflow_dispatch:
 
 jobs:
@@ -36,6 +36,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: true
+          ref: ${{ github.ref_name }}
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -44,30 +45,39 @@ jobs:
           cache: "pip"
 
       - name: Setup Chrome + Chromedriver
+        id: chrome
         uses: browser-actions/setup-chrome@v2
         with:
           install-chromedriver: true
 
+      - name: Remove preinstalled chromedriver
+        run: |
+          sudo rm -f /opt/hostedtoolcache/setup-chrome/chromedriver/stable/x64/chromedriver || true
+          which chromedriver || echo "chromedriver not in PATH (ok)"
+
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
-          pip install selenium==4.24.0 pandas==2.2.2 openpyxl==3.1.5
+          pip install "selenium>=4.24.0" "pandas==2.2.2" "openpyxl==3.1.5"
 
-      - name: Debug repo tree (se necessário)
+      - name: Sanity check (versions)
         run: |
-          echo "PWD: $(pwd)"
-          ls -R || true
+          echo "Chrome:       ${{ steps.chrome.outputs.chrome-version }}"
+          echo "Chromedriver: ${{ steps.chrome.outputs.chromedriver-version }}"
+          ${{ steps.chrome.outputs.chrome-path }} --version
+          ${{ steps.chrome.outputs.chromedriver-path }} --version
 
       - name: Run ${{ matrix.grupo.nome }}
         shell: bash
         env:
           TRECHOS_CSV: ${{ matrix.grupo.trechos }}
           ADVPS_CSV: "1,5,11,17,30"
+          CHROME_PATH: ${{ steps.chrome.outputs.chrome-path }}
+          CHROMEDRIVER_PATH: ${{ steps.chrome.outputs.chromedriver-path }}
         run: |
           set -e
           mkdir -p "data/${{ matrix.grupo.nome }}"
 
-          # Candidatos conhecidos
           CANDIDATES=("scripts/capoviagens_scraper_gha.py" \
                       "scripts/capo_scraper.py" \
                       "capoviagens_scraper_gha.py" \
@@ -78,7 +88,6 @@ jobs:
             if [ -f "$c" ]; then SCRIPT_PATH="$c"; break; fi
           done
 
-          # Último recurso: procurar no repo
           if [ -z "$SCRIPT_PATH" ]; then
             FOUND=$(git ls-files | grep -E '(capoviagens_scraper_gha|capo_scraper)\.py$' | head -n1 || true)
             if [ -n "$FOUND" ]; then SCRIPT_PATH="$FOUND"; fi
@@ -100,26 +109,36 @@ jobs:
             --pageload-timeout 30 \
             --headless
 
-      - name: Commit only this group's files (rebase + retry)
+      - name: Prepare branch (pull rebase)
         shell: bash
         run: |
           set -e
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           BRANCH="${GITHUB_REF_NAME}"
-
           git fetch origin "$BRANCH"
           git checkout "$BRANCH"
-          git rebase "origin/$BRANCH" || git reset --hard "origin/$BRANCH"
+          git pull --rebase origin "$BRANCH" || git reset --hard "origin/$BRANCH"
 
+      - name: Commit only this group's files
+        id: commit_data
+        shell: bash
+        run: |
+          set -e
           git add "data/${{ matrix.grupo.nome }}/" || true
           if git diff --cached --quiet; then
+            echo "did_commit=0" >> "$GITHUB_OUTPUT"
             echo "Sem mudanças para commit."
-            exit 0
+          else
+            git commit -m "CAPO ${{ matrix.grupo.nome }} XLS $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+            echo "did_commit=1" >> "$GITHUB_OUTPUT"
           fi
 
-          git commit -m "CAPO ${{ matrix.grupo.nome }} XLS $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
-
+      - name: Push
+        if: ${{ steps.commit_data.outputs.did_commit == '1' }}
+        shell: bash
+        run: |
+          BRANCH="${GITHUB_REF_NAME}"
           n=0
           until [ $n -ge 5 ]; do
             if git push origin "$BRANCH"; then
