@@ -29,18 +29,12 @@ jobs:
         with:
           python-version: "3.12"
 
-      # Instala Chrome + Chromedriver compatíveis e expõe paths/versões via outputs
+      # Instala Chrome + Chromedriver compatíveis
       - name: Setup Chrome
         id: chrome
         uses: browser-actions/setup-chrome@v2
         with:
           install-chromedriver: true
-
-      # Remove chromedriver pré-instalado do runner para evitar conflito
-      - name: Remove preinstalled chromedriver
-        run: |
-          sudo rm -f /opt/hostedtoolcache/setup-chrome/chromedriver/stable/x64/chromedriver || true
-          which chromedriver || echo "chromedriver not found in PATH (ok)"
 
       - name: Install deps
         run: |
@@ -53,16 +47,17 @@ jobs:
           echo "Chrome:       ${{ steps.chrome.outputs.chrome-version }}"
           echo "Chromedriver: ${{ steps.chrome.outputs.chromedriver-version }}"
           ${{ steps.chrome.outputs.chrome-path }} --version
-          ${{ steps.chrome.outputs.chromedriver-path }} --version
+          which chromedriver || true
+          chromedriver --version
 
       - name: Run scraper (gera output/FLIPMILHAS.xlsx)
         env:
           CHROME_PATH: ${{ steps.chrome.outputs.chrome-path }}
+          # Opcional: deixe o Selenium resolver via PATH; se quiser forçar, mantenha a linha abaixo
           CHROMEDRIVER_PATH: ${{ steps.chrome.outputs.chromedriver-path }}
         run: |
           python flipmilhas_scraper_gha.py --headless --once
 
-      # Puxa antes de commitar para evitar conflitos
       - name: Pull (rebase)
         env:
           BRANCH: ${{ github.ref_name }}
@@ -71,9 +66,8 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git fetch origin "$BRANCH"
           git checkout "$BRANCH"
-          git pull --rebase origin "$BRANCH" || true
+          git pull --rebase origin "$BRANCH" || git reset --hard "origin/$BRANCH"
 
-      # Copia com timestamp e commita se houver mudanças
       - name: Commit cópia com timestamp em data/
         id: commit_data
         run: |
@@ -86,7 +80,6 @@ jobs:
             echo "did_commit=0" >> "$GITHUB_OUTPUT"
             echo "Sem mudanças para commitar."
           else
-            GIT_AUTHOR_DATE="$(date -R)" GIT_COMMITTER_DATE="$(date -R)" \
             git commit -m "Atualiza FLIPMILHAS.xlsx (${ts}) [localtime]"
             echo "did_commit=1" >> "$GITHUB_OUTPUT"
           fi
@@ -105,7 +98,6 @@ jobs:
           name: FLIPMILHAS-planilha
           path: output/FLIPMILHAS.xlsx
 
-      # Reboot do Streamlit: commit vazio só se nada mudou
       - name: Trigger Streamlit redeploy (empty commit)
         if: ${{ success() && steps.commit_data.outputs.did_commit == '0' }}
         env:
